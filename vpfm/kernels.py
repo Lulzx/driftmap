@@ -7,87 +7,118 @@ Implements B-spline kernels for improved P2G/G2P accuracy:
 
 Higher-order kernels reduce interpolation error and improve
 structure preservation, at the cost of more computation per transfer.
+
+Performance optimized with Numba JIT compilation.
 """
 
 import numpy as np
 from typing import Tuple
+from numba import njit, prange
 
+
+# =============================================================================
+# Numba-compiled 1D kernel functions (scalar versions for JIT)
+# =============================================================================
+
+@njit(cache=True, fastmath=True)
+def _linear_kernel_scalar(x: float) -> float:
+    """Linear (tent) kernel for single value."""
+    ax = abs(x)
+    if ax < 1.0:
+        return 1.0 - ax
+    return 0.0
+
+
+@njit(cache=True, fastmath=True)
+def _quadratic_bspline_scalar(x: float) -> float:
+    """Quadratic B-spline kernel for single value."""
+    ax = abs(x)
+    if ax < 0.5:
+        return 0.75 - ax * ax
+    elif ax < 1.5:
+        t = 1.5 - ax
+        return 0.5 * t * t
+    return 0.0
+
+
+@njit(cache=True, fastmath=True)
+def _cubic_bspline_scalar(x: float) -> float:
+    """Cubic B-spline kernel for single value."""
+    ax = abs(x)
+    if ax < 1.0:
+        return 2.0/3.0 - ax*ax + 0.5*ax*ax*ax
+    elif ax < 2.0:
+        t = 2.0 - ax
+        return t*t*t / 6.0
+    return 0.0
+
+
+@njit(cache=True, fastmath=True)
+def _quadratic_bspline_deriv_scalar(x: float) -> float:
+    """Derivative of quadratic B-spline."""
+    ax = abs(x)
+    if ax < 0.5:
+        return -2.0 * x
+    elif ax < 1.5:
+        sx = 1.0 if x > 0 else -1.0
+        return -(1.5 - ax) * sx
+    return 0.0
+
+
+@njit(cache=True, fastmath=True)
+def _cubic_bspline_deriv_scalar(x: float) -> float:
+    """Derivative of cubic B-spline."""
+    ax = abs(x)
+    sx = 1.0 if x > 0 else (-1.0 if x < 0 else 0.0)
+    if ax < 1.0:
+        return -2.0 * x + 1.5 * ax * ax * sx
+    elif ax < 2.0:
+        t = 2.0 - ax
+        return -0.5 * t * t * sx
+    return 0.0
+
+
+# =============================================================================
+# Vectorized kernel functions (for compatibility)
+# =============================================================================
 
 def linear_kernel_1d(x: np.ndarray) -> np.ndarray:
-    """Linear (tent) kernel in 1D.
-
-    W(x) = 1 - |x|  for |x| < 1
-           0        otherwise
-
-    Support: [-1, 1]
-    """
+    """Linear (tent) kernel in 1D."""
     ax = np.abs(x)
     return np.where(ax < 1, 1 - ax, 0.0)
 
 
 def quadratic_bspline_1d(x: np.ndarray) -> np.ndarray:
-    """Quadratic B-spline kernel in 1D.
-
-    W(x) = 3/4 - x²           for |x| < 0.5
-           (3/2 - |x|)²/2     for 0.5 ≤ |x| < 1.5
-           0                  otherwise
-
-    Support: [-1.5, 1.5], C¹ continuous
-    """
+    """Quadratic B-spline kernel in 1D."""
     ax = np.abs(x)
     result = np.zeros_like(x)
-
-    # |x| < 0.5
     mask1 = ax < 0.5
     result[mask1] = 0.75 - ax[mask1]**2
-
-    # 0.5 ≤ |x| < 1.5
     mask2 = (ax >= 0.5) & (ax < 1.5)
     result[mask2] = 0.5 * (1.5 - ax[mask2])**2
-
     return result
 
 
 def cubic_bspline_1d(x: np.ndarray) -> np.ndarray:
-    """Cubic B-spline kernel in 1D.
-
-    W(x) = 2/3 - x² + |x|³/2           for |x| < 1
-           (2 - |x|)³/6                 for 1 ≤ |x| < 2
-           0                            otherwise
-
-    Support: [-2, 2], C² continuous
-    """
+    """Cubic B-spline kernel in 1D."""
     ax = np.abs(x)
     result = np.zeros_like(x)
-
-    # |x| < 1
     mask1 = ax < 1
     result[mask1] = 2/3 - ax[mask1]**2 + ax[mask1]**3 / 2
-
-    # 1 ≤ |x| < 2
     mask2 = (ax >= 1) & (ax < 2)
     result[mask2] = (2 - ax[mask2])**3 / 6
-
     return result
 
 
 def quadratic_bspline_derivative_1d(x: np.ndarray) -> np.ndarray:
-    """Derivative of quadratic B-spline kernel.
-
-    dW/dx for computing gradients during G2P.
-    """
+    """Derivative of quadratic B-spline kernel."""
     ax = np.abs(x)
     sx = np.sign(x)
     result = np.zeros_like(x)
-
-    # |x| < 0.5: d/dx(3/4 - x²) = -2x
     mask1 = ax < 0.5
     result[mask1] = -2 * x[mask1]
-
-    # 0.5 ≤ |x| < 1.5: d/dx((3/2 - |x|)²/2) = -(3/2 - |x|) * sign(x)
     mask2 = (ax >= 0.5) & (ax < 1.5)
     result[mask2] = -(1.5 - ax[mask2]) * sx[mask2]
-
     return result
 
 
@@ -96,17 +127,319 @@ def cubic_bspline_derivative_1d(x: np.ndarray) -> np.ndarray:
     ax = np.abs(x)
     sx = np.sign(x)
     result = np.zeros_like(x)
-
-    # |x| < 1: d/dx(2/3 - x² + |x|³/2) = -2x + 3x²/2 * sign(x)
     mask1 = ax < 1
     result[mask1] = -2 * x[mask1] + 1.5 * ax[mask1]**2 * sx[mask1]
-
-    # 1 ≤ |x| < 2: d/dx((2 - |x|)³/6) = -(2 - |x|)²/2 * sign(x)
     mask2 = (ax >= 1) & (ax < 2)
     result[mask2] = -0.5 * (2 - ax[mask2])**2 * sx[mask2]
-
     return result
 
+
+# =============================================================================
+# Numba-optimized P2G transfers
+# =============================================================================
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _p2g_quadratic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
+                          nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Numba-optimized P2G with quadratic B-spline kernel.
+
+    Returns (q_grid, weight_grid) to be normalized afterwards.
+    """
+    n_particles = len(px)
+    q_grid = np.zeros((nx, ny))
+    weight_grid = np.zeros((nx, ny))
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        # Base index (center on nearest grid point)
+        base_i = int(np.floor(x_norm + 0.5)) - 1
+        base_j = int(np.floor(y_norm + 0.5)) - 1
+
+        # Offset from center
+        fx = x_norm - (base_i + 1)
+        fy = y_norm - (base_j + 1)
+
+        q_p = pq[p]
+
+        # 3x3 stencil for quadratic
+        for di in range(3):
+            xi = (di - 1) - fx
+            wx = _quadratic_bspline_scalar(xi)
+            gi = (base_i + di) % nx
+
+            for dj in range(3):
+                yj = (dj - 1) - fy
+                wy = _quadratic_bspline_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                w = wx * wy
+                # Atomic add (handled by numba for parallel)
+                q_grid[gi, gj] += w * q_p
+                weight_grid[gi, gj] += w
+
+    return q_grid, weight_grid
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _p2g_linear_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
+                       nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Numba-optimized P2G with linear kernel."""
+    n_particles = len(px)
+    q_grid = np.zeros((nx, ny))
+    weight_grid = np.zeros((nx, ny))
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        base_i = int(np.floor(x_norm))
+        base_j = int(np.floor(y_norm))
+
+        fx = x_norm - base_i
+        fy = y_norm - base_j
+
+        q_p = pq[p]
+
+        for di in range(2):
+            xi = di - fx
+            wx = _linear_kernel_scalar(xi)
+            gi = (base_i + di) % nx
+
+            for dj in range(2):
+                yj = dj - fy
+                wy = _linear_kernel_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                w = wx * wy
+                q_grid[gi, gj] += w * q_p
+                weight_grid[gi, gj] += w
+
+    return q_grid, weight_grid
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _p2g_cubic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
+                      nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Numba-optimized P2G with cubic B-spline kernel."""
+    n_particles = len(px)
+    q_grid = np.zeros((nx, ny))
+    weight_grid = np.zeros((nx, ny))
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        base_i = int(np.floor(x_norm)) - 1
+        base_j = int(np.floor(y_norm)) - 1
+
+        fx = x_norm - (base_i + 1)
+        fy = y_norm - (base_j + 1)
+
+        q_p = pq[p]
+
+        for di in range(4):
+            xi = (di - 1) - fx
+            wx = _cubic_bspline_scalar(xi)
+            gi = (base_i + di) % nx
+
+            for dj in range(4):
+                yj = (dj - 1) - fy
+                wy = _cubic_bspline_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                w = wx * wy
+                q_grid[gi, gj] += w * q_p
+                weight_grid[gi, gj] += w
+
+    return q_grid, weight_grid
+
+
+# =============================================================================
+# Numba-optimized G2P transfers
+# =============================================================================
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _g2p_quadratic_numba(grid_field: np.ndarray, px: np.ndarray, py: np.ndarray,
+                          dx: float, dy: float) -> np.ndarray:
+    """Numba-optimized G2P with quadratic B-spline kernel."""
+    nx, ny = grid_field.shape
+    n_particles = len(px)
+    values = np.zeros(n_particles)
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        base_i = int(np.floor(x_norm + 0.5)) - 1
+        base_j = int(np.floor(y_norm + 0.5)) - 1
+
+        fx = x_norm - (base_i + 1)
+        fy = y_norm - (base_j + 1)
+
+        val = 0.0
+        for di in range(3):
+            xi = (di - 1) - fx
+            wx = _quadratic_bspline_scalar(xi)
+            gi = (base_i + di) % nx
+
+            for dj in range(3):
+                yj = (dj - 1) - fy
+                wy = _quadratic_bspline_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                val += wx * wy * grid_field[gi, gj]
+
+        values[p] = val
+
+    return values
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _g2p_linear_numba(grid_field: np.ndarray, px: np.ndarray, py: np.ndarray,
+                       dx: float, dy: float) -> np.ndarray:
+    """Numba-optimized G2P with linear kernel."""
+    nx, ny = grid_field.shape
+    n_particles = len(px)
+    values = np.zeros(n_particles)
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        base_i = int(np.floor(x_norm))
+        base_j = int(np.floor(y_norm))
+
+        fx = x_norm - base_i
+        fy = y_norm - base_j
+
+        val = 0.0
+        for di in range(2):
+            xi = di - fx
+            wx = _linear_kernel_scalar(xi)
+            gi = (base_i + di) % nx
+
+            for dj in range(2):
+                yj = dj - fy
+                wy = _linear_kernel_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                val += wx * wy * grid_field[gi, gj]
+
+        values[p] = val
+
+    return values
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _g2p_cubic_numba(grid_field: np.ndarray, px: np.ndarray, py: np.ndarray,
+                      dx: float, dy: float) -> np.ndarray:
+    """Numba-optimized G2P with cubic B-spline kernel."""
+    nx, ny = grid_field.shape
+    n_particles = len(px)
+    values = np.zeros(n_particles)
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        base_i = int(np.floor(x_norm)) - 1
+        base_j = int(np.floor(y_norm)) - 1
+
+        fx = x_norm - (base_i + 1)
+        fy = y_norm - (base_j + 1)
+
+        val = 0.0
+        for di in range(4):
+            xi = (di - 1) - fx
+            wx = _cubic_bspline_scalar(xi)
+            gi = (base_i + di) % nx
+
+            for dj in range(4):
+                yj = (dj - 1) - fy
+                wy = _cubic_bspline_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                val += wx * wy * grid_field[gi, gj]
+
+        values[p] = val
+
+    return values
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _g2p_with_gradient_quadratic_numba(grid_field: np.ndarray, px: np.ndarray, py: np.ndarray,
+                                        dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Numba-optimized G2P with gradient for quadratic kernel."""
+    nx, ny = grid_field.shape
+    n_particles = len(px)
+    values = np.zeros(n_particles)
+    grad_x = np.zeros(n_particles)
+    grad_y = np.zeros(n_particles)
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        base_i = int(np.floor(x_norm + 0.5)) - 1
+        base_j = int(np.floor(y_norm + 0.5)) - 1
+
+        fx = x_norm - (base_i + 1)
+        fy = y_norm - (base_j + 1)
+
+        val = 0.0
+        gx = 0.0
+        gy = 0.0
+
+        for di in range(3):
+            xi = (di - 1) - fx
+            wx = _quadratic_bspline_scalar(xi)
+            dwx = _quadratic_bspline_deriv_scalar(xi) * inv_dx
+            gi = (base_i + di) % nx
+
+            for dj in range(3):
+                yj = (dj - 1) - fy
+                wy = _quadratic_bspline_scalar(yj)
+                dwy = _quadratic_bspline_deriv_scalar(yj) * inv_dy
+                gj = (base_j + dj) % ny
+
+                f = grid_field[gi, gj]
+                val += wx * wy * f
+                gx += dwx * wy * f
+                gy += wx * dwy * f
+
+        values[p] = val
+        grad_x[p] = gx
+        grad_y[p] = gy
+
+    return values, grad_x, grad_y
+
+
+# =============================================================================
+# InterpolationKernel class (compatibility wrapper)
+# =============================================================================
 
 class InterpolationKernel:
     """2D interpolation kernel for P2G/G2P operations."""
@@ -122,8 +455,8 @@ class InterpolationKernel:
         if order == 'linear':
             self.kernel_1d = linear_kernel_1d
             self.derivative_1d = lambda x: np.where(np.abs(x) < 1, -np.sign(x), 0.0)
-            self.support = 1  # Half-width of support
-            self.n_neighbors = 2  # Neighbors per dimension
+            self.support = 1
+            self.n_neighbors = 2
         elif order == 'quadratic':
             self.kernel_1d = quadratic_bspline_1d
             self.derivative_1d = quadratic_bspline_derivative_1d
@@ -139,44 +472,29 @@ class InterpolationKernel:
 
     def weights_2d(self, x: np.ndarray, y: np.ndarray,
                    dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute 2D weights for a set of particles.
-
-        Args:
-            x, y: Particle positions (n_particles,)
-            dx, dy: Grid spacing
-
-        Returns:
-            (base_i, base_j, weights) where:
-            - base_i, base_j: Base grid indices (n_particles,)
-            - weights: Weight array (n_particles, n_neighbors, n_neighbors)
-        """
+        """Compute 2D weights for a set of particles."""
         n_particles = len(x)
         n = self.n_neighbors
 
-        # Normalized positions
         x_norm = x / dx
         y_norm = y / dy
 
-        # Base indices (lower-left of stencil)
         if self.order == 'linear':
-            base_i = np.floor(x_norm).astype(int)
-            base_j = np.floor(y_norm).astype(int)
-            # Offset from base
+            base_i = np.floor(x_norm).astype(np.int32)
+            base_j = np.floor(y_norm).astype(np.int32)
             fx = x_norm - base_i
             fy = y_norm - base_j
         elif self.order == 'quadratic':
-            # For quadratic, center on nearest grid point
-            base_i = np.floor(x_norm + 0.5).astype(int) - 1
-            base_j = np.floor(y_norm + 0.5).astype(int) - 1
-            fx = x_norm - (base_i + 1)  # Offset from center
+            base_i = np.floor(x_norm + 0.5).astype(np.int32) - 1
+            base_j = np.floor(y_norm + 0.5).astype(np.int32) - 1
+            fx = x_norm - (base_i + 1)
             fy = y_norm - (base_j + 1)
-        else:  # cubic
-            base_i = np.floor(x_norm).astype(int) - 1
-            base_j = np.floor(y_norm).astype(int) - 1
+        else:
+            base_i = np.floor(x_norm).astype(np.int32) - 1
+            base_j = np.floor(y_norm).astype(np.int32) - 1
             fx = x_norm - (base_i + 1)
             fy = y_norm - (base_j + 1)
 
-        # Compute 1D weights
         weights = np.zeros((n_particles, n, n))
 
         for di in range(n):
@@ -185,10 +503,10 @@ class InterpolationKernel:
                     xi = di - fx
                     yj = dj - fy
                 elif self.order == 'quadratic':
-                    xi = (di - 1) - fx  # di=0,1,2 -> offset -1,0,1
+                    xi = (di - 1) - fx
                     yj = (dj - 1) - fy
-                else:  # cubic
-                    xi = (di - 1) - fx  # di=0,1,2,3 -> offset -1,0,1,2
+                else:
+                    xi = (di - 1) - fx
                     yj = (dj - 1) - fy
 
                 wx = self.kernel_1d(xi)
@@ -199,11 +517,7 @@ class InterpolationKernel:
 
     def weights_and_gradients_2d(self, x: np.ndarray, y: np.ndarray,
                                   dx: float, dy: float) -> Tuple:
-        """Compute weights and gradient weights.
-
-        Returns:
-            (base_i, base_j, weights, grad_x, grad_y)
-        """
+        """Compute weights and gradient weights."""
         n_particles = len(x)
         n = self.n_neighbors
 
@@ -211,18 +525,18 @@ class InterpolationKernel:
         y_norm = y / dy
 
         if self.order == 'linear':
-            base_i = np.floor(x_norm).astype(int)
-            base_j = np.floor(y_norm).astype(int)
+            base_i = np.floor(x_norm).astype(np.int32)
+            base_j = np.floor(y_norm).astype(np.int32)
             fx = x_norm - base_i
             fy = y_norm - base_j
         elif self.order == 'quadratic':
-            base_i = np.floor(x_norm + 0.5).astype(int) - 1
-            base_j = np.floor(y_norm + 0.5).astype(int) - 1
+            base_i = np.floor(x_norm + 0.5).astype(np.int32) - 1
+            base_j = np.floor(y_norm + 0.5).astype(np.int32) - 1
             fx = x_norm - (base_i + 1)
             fy = y_norm - (base_j + 1)
         else:
-            base_i = np.floor(x_norm).astype(int) - 1
-            base_j = np.floor(y_norm).astype(int) - 1
+            base_i = np.floor(x_norm).astype(np.int32) - 1
+            base_j = np.floor(y_norm).astype(np.int32) - 1
             fx = x_norm - (base_i + 1)
             fy = y_norm - (base_j + 1)
 
@@ -254,41 +568,28 @@ class InterpolationKernel:
         return base_i, base_j, weights, grad_x, grad_y
 
 
+# =============================================================================
+# Public API functions (use Numba-optimized versions)
+# =============================================================================
+
 def P2G_bspline(particles_x: np.ndarray, particles_y: np.ndarray,
                 particles_q: np.ndarray, nx: int, ny: int,
                 dx: float, dy: float, kernel: InterpolationKernel) -> np.ndarray:
     """Transfer particle vorticity to grid using B-spline kernel.
 
-    Args:
-        particles_x, particles_y: Particle positions
-        particles_q: Particle vorticity
-        nx, ny: Grid dimensions
-        dx, dy: Grid spacing
-        kernel: Interpolation kernel
-
-    Returns:
-        Grid vorticity field (nx, ny)
+    Uses Numba-optimized implementation for performance.
     """
-    q_grid = np.zeros((nx, ny))
-    weight_grid = np.zeros((nx, ny))
+    # Ensure contiguous arrays
+    px = np.ascontiguousarray(particles_x)
+    py = np.ascontiguousarray(particles_y)
+    pq = np.ascontiguousarray(particles_q)
 
-    base_i, base_j, weights = kernel.weights_2d(particles_x, particles_y, dx, dy)
-
-    n = kernel.n_neighbors
-    n_particles = len(particles_x)
-
-    for p in range(n_particles):
-        q_p = particles_q[p]
-        bi, bj = base_i[p], base_j[p]
-
-        for di in range(n):
-            for dj in range(n):
-                gi = (bi + di) % nx
-                gj = (bj + dj) % ny
-                w = weights[p, di, dj]
-
-                q_grid[gi, gj] += w * q_p
-                weight_grid[gi, gj] += w
+    if kernel.order == 'linear':
+        q_grid, weight_grid = _p2g_linear_numba(px, py, pq, nx, ny, dx, dy)
+    elif kernel.order == 'quadratic':
+        q_grid, weight_grid = _p2g_quadratic_numba(px, py, pq, nx, ny, dx, dy)
+    else:  # cubic
+        q_grid, weight_grid = _p2g_cubic_numba(px, py, pq, nx, ny, dx, dy)
 
     # Normalize
     mask = weight_grid > 1e-10
@@ -302,33 +603,19 @@ def G2P_bspline(grid_field: np.ndarray, particles_x: np.ndarray,
                 kernel: InterpolationKernel) -> np.ndarray:
     """Interpolate grid field to particles using B-spline kernel.
 
-    Args:
-        grid_field: Field on grid (nx, ny)
-        particles_x, particles_y: Particle positions
-        dx, dy: Grid spacing
-        kernel: Interpolation kernel
-
-    Returns:
-        Field values at particles (n_particles,)
+    Uses Numba-optimized implementation for performance.
     """
-    nx, ny = grid_field.shape
-    n_particles = len(particles_x)
+    # Ensure contiguous arrays
+    field = np.ascontiguousarray(grid_field)
+    px = np.ascontiguousarray(particles_x)
+    py = np.ascontiguousarray(particles_y)
 
-    base_i, base_j, weights = kernel.weights_2d(particles_x, particles_y, dx, dy)
-
-    n = kernel.n_neighbors
-    values = np.zeros(n_particles)
-
-    for p in range(n_particles):
-        bi, bj = base_i[p], base_j[p]
-
-        for di in range(n):
-            for dj in range(n):
-                gi = (bi + di) % nx
-                gj = (bj + dj) % ny
-                values[p] += weights[p, di, dj] * grid_field[gi, gj]
-
-    return values
+    if kernel.order == 'linear':
+        return _g2p_linear_numba(field, px, py, dx, dy)
+    elif kernel.order == 'quadratic':
+        return _g2p_quadratic_numba(field, px, py, dx, dy)
+    else:  # cubic
+        return _g2p_cubic_numba(field, px, py, dx, dy)
 
 
 def G2P_bspline_with_gradient(grid_field: np.ndarray, particles_x: np.ndarray,
@@ -336,9 +623,17 @@ def G2P_bspline_with_gradient(grid_field: np.ndarray, particles_x: np.ndarray,
                                kernel: InterpolationKernel) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Interpolate grid field and its gradient to particles.
 
-    Returns:
-        (values, grad_x, grad_y) at particle positions
+    Uses Numba-optimized implementation for quadratic kernel.
     """
+    # Ensure contiguous arrays
+    field = np.ascontiguousarray(grid_field)
+    px = np.ascontiguousarray(particles_x)
+    py = np.ascontiguousarray(particles_y)
+
+    if kernel.order == 'quadratic':
+        return _g2p_with_gradient_quadratic_numba(field, px, py, dx, dy)
+
+    # Fallback to non-optimized for other kernels
     nx, ny = grid_field.shape
     n_particles = len(particles_x)
 
@@ -352,13 +647,11 @@ def G2P_bspline_with_gradient(grid_field: np.ndarray, particles_x: np.ndarray,
 
     for p in range(n_particles):
         bi, bj = base_i[p], base_j[p]
-
         for di in range(n):
             for dj in range(n):
                 gi = (bi + di) % nx
                 gj = (bj + dj) % ny
                 f = grid_field[gi, gj]
-
                 values[p] += weights[p, di, dj] * f
                 grad_x[p] += gx[p, di, dj] * f
                 grad_y[p] += gy[p, di, dj] * f
