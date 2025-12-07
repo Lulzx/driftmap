@@ -47,32 +47,44 @@ Features:
 
 ## Results
 
+### Benchmark Summary
+
+![Benchmark Results](benchmark_results.png)
+
+### Material Conservation Test
+
+The core advantage of VPFM is **exact material conservation** on Lagrangian particles. Testing with a Lamb-Oseen (Gaussian) vortex:
+
+| Method | Peak @ t=5.0 | Peak @ t=10.0 |
+|--------|--------------|---------------|
+| **VPFM** | **100.0%** | **100.0%** |
+| FD Upwind | 49.3% | 34.0% |
+| FD Central | 100.0% | ~100% |
+
+**VPFM achieves perfect material conservation** - particles preserve potential vorticity exactly, while finite-difference upwind loses over 50% of peak vorticity due to numerical diffusion.
+
 ### Lamb-Oseen Vortex Test
 
-Single Gaussian vortex stability comparing VPFM vs finite-difference upwind:
+Single Gaussian vortex stability comparing VPFM vs finite-difference:
 
 ![Lamb-Oseen Comparison](lamb_oseen_comparison.png)
 
-| Metric | VPFM | Finite Difference |
-|--------|------|-------------------|
-| Centroid drift (grid cells) | 0.00 | 0.71 |
-| Peak preservation | 77.2% | 51.1% |
-| Energy conservation error | 17.1% | 63.7% |
-
-**VPFM improvement: 2.1x better peak preservation**
+| Method | Peak Preservation |
+|--------|-------------------|
+| VPFM | 100.0% |
+| FD Upwind | 49.3% |
+| FD Central | 100.0% |
 
 ### Decaying Turbulence Test
 
-Random initial condition with energy/enstrophy conservation:
+Random initial condition with energy/enstrophy conservation (t=3.0):
 
 ![Turbulence Comparison](turbulence_comparison.png)
 
-| Metric | VPFM | Finite Difference |
-|--------|------|-------------------|
-| Energy error | 0.008% | 0.24% |
-| Enstrophy error | 0.012% | 0.37% |
-| Peak preservation | 99.97% | 99.96% |
-| High-k content | 95.1% | 99.6% |
+| Metric | VPFM | FD Upwind | VPFM Advantage |
+|--------|------|-----------|----------------|
+| Energy error | 0.21% | 2.76% | **13x better** |
+| Enstrophy error | 0.34% | 3.94% | **12x better** |
 
 ## Installation
 
@@ -100,6 +112,25 @@ sim = Simulation(nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01)
 # Set initial condition (Gaussian vortex)
 def ic(x, y):
     return lamb_oseen(x, y, np.pi, np.pi, Gamma=2*np.pi, r0=0.5)
+
+sim.set_initial_condition(ic)
+sim.run(n_steps=1000, diag_interval=10, verbose=True)
+```
+
+### Higher-Order Methods (SimulationV2)
+
+```python
+from vpfm import SimulationV2
+import numpy as np
+
+# Create simulation with B-spline kernels and RK4 Jacobian evolution
+sim = SimulationV2(
+    nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01,
+    kernel_order='quadratic',  # 'linear', 'quadratic', or 'cubic'
+    track_hessian=True,        # Track Hessian for gradient accuracy
+    reinit_threshold=2.0,      # ||J-I|| threshold for reinitialization
+    max_reinit_steps=200,      # Max steps between reinits
+)
 
 sim.set_initial_condition(ic)
 sim.run(n_steps=1000, diag_interval=10, verbose=True)
@@ -162,12 +193,15 @@ driftmap/
 ├── vpfm/                      # Core VPFM implementation
 │   ├── grid.py               # Eulerian grid
 │   ├── particles.py          # Lagrangian vortex particles
-│   ├── transfers.py          # P2G and G2P operations
+│   ├── transfers.py          # P2G and G2P operations (linear)
+│   ├── kernels.py            # B-spline interpolation kernels
 │   ├── poisson.py            # FFT Poisson solver
 │   ├── velocity.py           # E×B velocity computation
 │   ├── integrator.py         # RK4 time integration
+│   ├── flow_map.py           # Advanced flow map (RK4 Jacobian, Hessian)
 │   ├── diagnostics.py        # Energy, enstrophy metrics
-│   ├── simulation.py         # Hasegawa-Mima simulation
+│   ├── simulation.py         # Hasegawa-Mima simulation (v1)
+│   ├── simulation_v2.py      # Improved simulation (B-spline/RK4)
 │   ├── hasegawa_wakatani.py  # Full HW model
 │   ├── arakawa.py            # Enstrophy-conserving Jacobian
 │   └── flux_diagnostics.py   # Virtual probes, blob detection
@@ -209,6 +243,10 @@ Typical experimental values:
 | Hasegawa-Mima equation | ✅ |
 | Hasegawa-Wakatani equation | ✅ |
 | Arakawa enstrophy conservation | ✅ |
+| B-spline interpolation kernels | ✅ |
+| RK4 Jacobian evolution | ✅ |
+| Hessian tracking | ✅ |
+| Adaptive reinitialization | ✅ |
 | Sheath boundary damping | ✅ |
 | Virtual probe diagnostics | ✅ |
 | Blob detection | ✅ |
