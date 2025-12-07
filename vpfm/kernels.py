@@ -186,6 +186,70 @@ def _p2g_quadratic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
 
 
 @njit(parallel=True, cache=True, fastmath=True)
+def _p2g_gradient_enhanced_quadratic_numba(
+    px: np.ndarray, py: np.ndarray, pq: np.ndarray,
+    grad_q_x: np.ndarray, grad_q_y: np.ndarray,
+    nx: int, ny: int, dx: float, dy: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Gradient-enhanced P2G with quadratic B-spline kernel.
+
+    Implements: ω_i^g = (Σ_p s_ip · [ω_p + ∇ω_p · (x_i - x_p)]) / (Σ_p s_ip)
+
+    This improves accuracy by including local gradient information.
+
+    Returns (q_grid, weight_grid) to be normalized afterwards.
+    """
+    n_particles = len(px)
+    q_grid = np.zeros((nx, ny))
+    weight_grid = np.zeros((nx, ny))
+
+    inv_dx = 1.0 / dx
+    inv_dy = 1.0 / dy
+
+    for p in prange(n_particles):
+        x_norm = px[p] * inv_dx
+        y_norm = py[p] * inv_dy
+
+        # Base index (center on nearest grid point)
+        base_i = int(np.floor(x_norm + 0.5)) - 1
+        base_j = int(np.floor(y_norm + 0.5)) - 1
+
+        # Offset from center
+        fx = x_norm - (base_i + 1)
+        fy = y_norm - (base_j + 1)
+
+        q_p = pq[p]
+        gx_p = grad_q_x[p]
+        gy_p = grad_q_y[p]
+
+        # 3x3 stencil for quadratic
+        for di in range(3):
+            xi = (di - 1) - fx
+            wx = _quadratic_bspline_scalar(xi)
+            gi = (base_i + di) % nx
+
+            # Distance from particle to grid point in physical units
+            delta_x = xi * dx
+
+            for dj in range(3):
+                yj = (dj - 1) - fy
+                wy = _quadratic_bspline_scalar(yj)
+                gj = (base_j + dj) % ny
+
+                delta_y = yj * dy
+
+                w = wx * wy
+
+                # Gradient-enhanced contribution: q_p + ∇q_p · Δx
+                q_enhanced = q_p + gx_p * delta_x + gy_p * delta_y
+
+                q_grid[gi, gj] += w * q_enhanced
+                weight_grid[gi, gj] += w
+
+    return q_grid, weight_grid
+
+
+@njit(parallel=True, cache=True, fastmath=True)
 def _p2g_linear_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
                        nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
     """Numba-optimized P2G with linear kernel."""
@@ -590,6 +654,54 @@ def P2G_bspline(particles_x: np.ndarray, particles_y: np.ndarray,
         q_grid, weight_grid = _p2g_quadratic_numba(px, py, pq, nx, ny, dx, dy)
     else:  # cubic
         q_grid, weight_grid = _p2g_cubic_numba(px, py, pq, nx, ny, dx, dy)
+
+    # Normalize
+    mask = weight_grid > 1e-10
+    q_grid[mask] /= weight_grid[mask]
+
+    return q_grid
+
+
+def P2G_bspline_gradient_enhanced(
+    particles_x: np.ndarray, particles_y: np.ndarray,
+    particles_q: np.ndarray,
+    grad_q_x: np.ndarray, grad_q_y: np.ndarray,
+    nx: int, ny: int, dx: float, dy: float,
+    kernel: InterpolationKernel
+) -> np.ndarray:
+    """Gradient-enhanced P2G transfer.
+
+    Implements: ω_i^g = (Σ_p s_ip · [ω_p + ∇ω_p · (x_i - x_p)]) / (Σ_p s_ip)
+
+    This improves accuracy by including local gradient information from particles.
+
+    Args:
+        particles_x, particles_y: Particle positions
+        particles_q: Particle vorticity values
+        grad_q_x, grad_q_y: Vorticity gradients on particles
+        nx, ny: Grid dimensions
+        dx, dy: Grid spacing
+        kernel: Interpolation kernel
+
+    Returns:
+        Grid field with gradient-enhanced interpolation
+    """
+    # Ensure contiguous arrays
+    px = np.ascontiguousarray(particles_x)
+    py = np.ascontiguousarray(particles_y)
+    pq = np.ascontiguousarray(particles_q)
+    gx = np.ascontiguousarray(grad_q_x)
+    gy = np.ascontiguousarray(grad_q_y)
+
+    if kernel.order == 'quadratic':
+        q_grid, weight_grid = _p2g_gradient_enhanced_quadratic_numba(
+            px, py, pq, gx, gy, nx, ny, dx, dy
+        )
+    else:
+        # Fallback to standard P2G for non-quadratic kernels
+        # (gradient-enhanced only implemented for quadratic so far)
+        return P2G_bspline(particles_x, particles_y, particles_q,
+                          nx, ny, dx, dy, kernel)
 
     # Normalize
     mask = weight_grid > 1e-10

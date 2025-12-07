@@ -29,6 +29,10 @@ class ParticleSystem:
         # Potential vorticity
         self.q = np.zeros(n_particles)
 
+        # Vorticity gradient (for gradient-enhanced P2G)
+        self.grad_q_x = np.zeros(n_particles)
+        self.grad_q_y = np.zeros(n_particles)
+
         # Flow map Jacobian (2x2 matrix per particle)
         # J[p] = [[J_xx, J_xy], [J_yx, J_yy]]
         self.J = np.zeros((n_particles, 2, 2))
