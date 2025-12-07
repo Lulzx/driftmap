@@ -1,0 +1,17 @@
+VPFM-Plasma Benchmark Results
+==================================================
+
+Test 1: Material Conservation (t=5.0)
+  VPFM:      100.0%
+  FD Upwind: 49.3%
+  FD Central: 100.0%
+
+Test 2: Conservation Laws (t=3.0)
+  VPFM Energy error:    0.208%
+  VPFM Enstrophy error: 0.341%
+  FD Energy error:      2.757%
+  FD Enstrophy error:   3.944%
+
+Test 3: Long-time Integration (t=10.0)
+  VPFM:      100.0%
+  FD Upwind: 34.0%
