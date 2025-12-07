@@ -5,6 +5,10 @@ pytest>=6.0
 numba>=0.56
 tqdm>=4.60
 
-# Optional: GPU acceleration (uncomment for CUDA support)
+# Optional: GPU acceleration
+# For Apple Silicon (M1/M2/M3):
+# mlx>=0.10
+
+# For NVIDIA GPUs:
 # cupy-cuda11x>=12.0  # For CUDA 11.x
 # cupy-cuda12x>=12.0  # For CUDA 12.x

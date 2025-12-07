@@ -209,7 +209,8 @@ driftmap/
 │   ├── particles.py          # Lagrangian vortex particles
 │   ├── transfers.py          # P2G and G2P operations (bilinear)
 │   ├── kernels.py            # B-spline kernels (Numba JIT)
-│   ├── kernels_gpu.py        # GPU kernels (CuPy/CUDA)
+│   ├── kernels_gpu.py        # NVIDIA GPU kernels (CuPy/CUDA)
+│   ├── kernels_mlx.py        # Apple Silicon kernels (MLX/Metal)
 │   ├── backend.py            # CPU/GPU backend abstraction
 │   ├── poisson.py            # FFT Poisson solver
 │   ├── velocity.py           # E×B velocity computation
@@ -300,7 +301,14 @@ python examples/benchmark_numba.py
 
 ### GPU Acceleration
 
-GPU support is available via CuPy (optional). Install with:
+GPU support is available via MLX (Apple Silicon) or CuPy (NVIDIA).
+
+**Apple Silicon (M1/M2/M3):**
+```bash
+pip install mlx
+```
+
+**NVIDIA GPUs:**
 ```bash
 pip install cupy-cuda11x  # For CUDA 11.x
 # or
@@ -309,13 +317,16 @@ pip install cupy-cuda12x  # For CUDA 12.x
 
 Usage:
 ```python
-from vpfm import check_gpu_available, set_backend
+from vpfm import check_mlx_available, check_cuda_available, set_backend, get_backend_name
 
-if check_gpu_available():
-    set_backend('gpu')  # Use GPU
-    print("Running on GPU")
-else:
-    set_backend('cpu')  # Fall back to CPU
+# Auto-detect best backend (MLX on Apple Silicon, CuPy on NVIDIA)
+set_backend('auto')
+print(f"Using: {get_backend_name()}")  # 'mlx', 'cuda', or 'cpu'
+
+# Or force a specific backend
+set_backend('mlx')   # Apple Silicon GPU
+set_backend('cuda')  # NVIDIA GPU
+set_backend('cpu')   # CPU (Numba)
 ```
 
 ### 3D Simulation
