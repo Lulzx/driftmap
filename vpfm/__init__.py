@@ -12,12 +12,16 @@ from .simulation import (
     SimulationV2,  # Backward compatibility alias
     lamb_oseen,
     vortex_pair,
+    kelvin_helmholtz,
     random_turbulence,
 )
 from .hasegawa_wakatani import HWSimulation, DensityParticles
 from .arakawa import arakawa_jacobian, compute_poisson_bracket
 from .flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
-from .kernels import InterpolationKernel, P2G_bspline, G2P_bspline
+from .kernels import (
+    InterpolationKernel, P2G_bspline, G2P_bspline,
+    P2G_bspline_gradient_enhanced, G2P_bspline_with_gradient
+)
 from .flow_map import FlowMapIntegrator, FlowMapState
 
 # Backend abstraction (CPU/GPU)
@@ -75,6 +79,7 @@ __all__ = [
     # Initial conditions
     "lamb_oseen",
     "vortex_pair",
+    "kelvin_helmholtz",
     "random_turbulence",
     # Legacy HW simulation (deprecated)
     "HWSimulation",
@@ -83,6 +88,8 @@ __all__ = [
     "InterpolationKernel",
     "P2G_bspline",
     "G2P_bspline",
+    "P2G_bspline_gradient_enhanced",
+    "G2P_bspline_with_gradient",
     "FlowMapIntegrator",
     "FlowMapState",
     # Enstrophy-conserving schemes

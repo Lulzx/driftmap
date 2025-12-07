@@ -21,7 +21,10 @@ from tqdm import tqdm
 
 from .grid import Grid
 from .particles import ParticleSystem
-from .kernels import InterpolationKernel, P2G_bspline, G2P_bspline
+from .kernels import (
+    InterpolationKernel, P2G_bspline, G2P_bspline,
+    P2G_bspline_gradient_enhanced, G2P_bspline_with_gradient
+)
 from .poisson import solve_poisson_hm
 from .velocity import compute_velocity, compute_velocity_gradient
 from .flow_map import FlowMapIntegrator, FlowMapState
@@ -61,7 +64,11 @@ class Simulation:
                  kappa: float = 0.0,      # Curvature drive
                  mu: float = 0.0,         # Hyperviscosity
                  D: float = 0.0,          # Density diffusion
-                 nu_sheath: float = 0.0): # Sheath damping
+                 nu_sheath: float = 0.0,  # Sheath damping
+                 # Advanced options
+                 use_gradient_p2g: bool = True,  # Use gradient-enhanced P2G
+                 adaptive_dt: bool = False,      # Use adaptive time stepping
+                 cfl_number: float = 0.5):       # CFL number for adaptive dt
         """Initialize simulation.
 
         Args:
@@ -78,6 +85,9 @@ class Simulation:
             mu: Hyperviscosity coefficient for ∇⁴ζ
             D: Density diffusivity for ∇²n
             nu_sheath: Sheath damping rate
+            use_gradient_p2g: Use gradient-enhanced P2G transfer
+            adaptive_dt: Use adaptive time stepping based on CFL
+            cfl_number: CFL number for adaptive time stepping
         """
         self.grid = Grid(nx, ny, Lx, Ly)
         self.particles = ParticleSystem.from_grid(self.grid, particles_per_cell)
@@ -99,6 +109,11 @@ class Simulation:
         self.mu = mu
         self.D = D
         self.nu_sheath = nu_sheath
+
+        # Advanced options
+        self.use_gradient_p2g = use_gradient_p2g
+        self.adaptive_dt = adaptive_dt
+        self.cfl_number = cfl_number
 
         # Density field on particles (for HW coupling)
         self.n_particles = np.zeros(self.particles.n_particles)
@@ -145,11 +160,21 @@ class Simulation:
 
     def _p2g(self):
         """Particle to grid transfer using B-spline kernel."""
-        self.grid.q = P2G_bspline(
-            self.particles.x, self.particles.y, self.particles.q,
-            self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy,
-            self.kernel
-        )
+        if self.use_gradient_p2g and hasattr(self.particles, 'grad_q_x'):
+            # Use gradient-enhanced P2G for improved accuracy
+            self.grid.q = P2G_bspline_gradient_enhanced(
+                self.particles.x, self.particles.y, self.particles.q,
+                self.particles.grad_q_x, self.particles.grad_q_y,
+                self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy,
+                self.kernel
+            )
+        else:
+            # Standard P2G
+            self.grid.q = P2G_bspline(
+                self.particles.x, self.particles.y, self.particles.q,
+                self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy,
+                self.kernel
+            )
 
     def _g2p(self):
         """Grid to particle transfer for reinitialization."""
@@ -158,12 +183,55 @@ class Simulation:
             self.grid.dx, self.grid.dy, self.kernel
         )
 
+    def _g2p_with_gradient(self):
+        """Grid to particle transfer including gradient computation."""
+        self.particles.q, self.particles.grad_q_x, self.particles.grad_q_y = \
+            G2P_bspline_with_gradient(
+                self.grid.q, self.particles.x, self.particles.y,
+                self.grid.dx, self.grid.dy, self.kernel
+            )
+
+    def compute_adaptive_dt(self) -> float:
+        """Compute adaptive timestep based on CFL condition.
+
+        Returns:
+            Timestep satisfying CFL condition: dt < CFL * min(dx, dy) / max|v|
+        """
+        max_v = max(np.max(np.abs(self.grid.vx)), np.max(np.abs(self.grid.vy)))
+        if max_v < 1e-10:
+            return self.dt  # No velocity, use default
+
+        min_dx = min(self.grid.dx, self.grid.dy)
+        dt_cfl = self.cfl_number * min_dx / max_v
+
+        # Also limit by flow map stability
+        max_grad_v = max(
+            np.max(np.abs(self.grid.dvx_dx)),
+            np.max(np.abs(self.grid.dvx_dy)),
+            np.max(np.abs(self.grid.dvy_dx)),
+            np.max(np.abs(self.grid.dvy_dy))
+        )
+        if max_grad_v > 1e-10:
+            dt_fm = 0.5 / max_grad_v  # Flow map stability
+            dt_cfl = min(dt_cfl, dt_fm)
+
+        # Don't exceed user-specified dt
+        return min(dt_cfl, self.dt)
+
     def reinitialize(self):
         """Reinitialize flow map."""
         # Current grid field is up to date from last P2G
-        self.particles.q = self.integrator.reinitialize(
-            self.particles, self.flow_map, self.grid.q
-        )
+        if self.use_gradient_p2g:
+            # Use G2P with gradient to update both value and gradient
+            self._g2p_with_gradient()
+            # Reset flow map state
+            self.integrator.reinitialize(
+                self.particles, self.flow_map, self.grid.q
+            )
+        else:
+            self.particles.q = self.integrator.reinitialize(
+                self.particles, self.flow_map, self.grid.q
+            )
         self.history['reinit_count'] += 1
 
     # ========================================================================
@@ -182,14 +250,17 @@ class Simulation:
         compute_velocity(self.grid)
         compute_velocity_gradient(self.grid)
 
-        # 4. Flow map evolution (Jacobian, Hessian, positions)
-        self.integrator.step(self.particles, self.flow_map, self.dt)
+        # 4. Compute timestep (adaptive or fixed)
+        dt_step = self.compute_adaptive_dt() if self.adaptive_dt else self.dt
 
-        # 5. Update time
-        self.time += self.dt
+        # 5. Flow map evolution (Jacobian, Hessian, positions)
+        self.integrator.step(self.particles, self.flow_map, dt_step)
+
+        # 6. Update time
+        self.time += dt_step
         self.step += 1
 
-        # 6. Check for reinitialization
+        # 7. Check for reinitialization
         if self.integrator.should_reinitialize(
             self.flow_map, self.reinit_threshold, self.max_reinit_steps
         ):
@@ -371,26 +442,29 @@ class Simulation:
         compute_velocity(self.grid)
         compute_velocity_gradient(self.grid)
 
-        # 4. Compute HW source terms on grid
+        # 4. Compute timestep (adaptive or fixed)
+        dt_step = self.compute_adaptive_dt() if self.adaptive_dt else self.dt
+
+        # 5. Compute HW source terms on grid
         S_zeta, S_n = self._compute_hw_sources()
 
-        # 5. Update particle strengths from grid sources
+        # 6. Update particle strengths from grid sources
         # Interpolate source terms to particle positions
         dq_dt = self._interpolate_to_particles(S_zeta)
         dn_dt = self._interpolate_to_particles(S_n)
 
-        self.particles.q += self.dt * dq_dt
-        self.n_particles += self.dt * dn_dt
+        self.particles.q += dt_step * dq_dt
+        self.n_particles += dt_step * dn_dt
 
-        # 6. Flow map evolution (Jacobian, Hessian, positions)
+        # 7. Flow map evolution (Jacobian, Hessian, positions)
         # This advects particles - vorticity transport is EXACT here
-        self.integrator.step(self.particles, self.flow_map, self.dt)
+        self.integrator.step(self.particles, self.flow_map, dt_step)
 
-        # 7. Update time
-        self.time += self.dt
+        # 8. Update time
+        self.time += dt_step
         self.step += 1
 
-        # 8. Check for reinitialization
+        # 9. Check for reinitialization
         if self.integrator.should_reinitialize(
             self.flow_map, self.reinit_threshold, self.max_reinit_steps
         ):
@@ -405,10 +479,18 @@ class Simulation:
         self._p2g()
         self._p2g_density()
 
-        # Reinitialize vorticity
-        self.particles.q = self.integrator.reinitialize(
-            self.particles, self.flow_map, self.grid.q
-        )
+        if self.use_gradient_p2g:
+            # Use G2P with gradient for vorticity
+            self._g2p_with_gradient()
+            # Reset flow map state
+            self.integrator.reinitialize(
+                self.particles, self.flow_map, self.grid.q
+            )
+        else:
+            # Reinitialize vorticity
+            self.particles.q = self.integrator.reinitialize(
+                self.particles, self.flow_map, self.grid.q
+            )
 
         # Reinitialize density
         self.n_particles = self._interpolate_to_particles(self.n_grid)
@@ -561,6 +643,47 @@ def vortex_pair(x: np.ndarray, y: np.ndarray,
     q2 = lamb_oseen(x, y, x2, y_center, Gamma, r0)
 
     return q1 + q2
+
+
+def kelvin_helmholtz(x: np.ndarray, y: np.ndarray,
+                     Lx: float, Ly: float,
+                     shear_width: float = 0.1,
+                     perturbation: float = 0.05,
+                     k_mode: int = 2) -> np.ndarray:
+    """Kelvin-Helmholtz shear layer initial condition.
+
+    Creates a shear layer at y = Ly/2 with a sinusoidal perturbation
+    to seed the KH instability.
+
+    Args:
+        x, y: Coordinate arrays
+        Lx, Ly: Domain size
+        shear_width: Width of the shear layer (fraction of Ly)
+        perturbation: Amplitude of initial perturbation
+        k_mode: Number of wavelengths in x direction
+
+    Returns:
+        Vorticity field for KH instability
+    """
+    y_mid = Ly / 2
+
+    # Shear layer thickness
+    delta = shear_width * Ly
+
+    # Base shear layer vorticity: d(tanh)/dy = sech^2
+    # v_x = tanh((y - y_mid)/delta) gives vorticity ζ = -∂v_x/∂y
+    arg = (y - y_mid) / delta
+    zeta_base = -1.0 / (delta * np.cosh(arg)**2)
+
+    # Sinusoidal perturbation in y-position of shear layer
+    k_x = 2 * np.pi * k_mode / Lx
+    y_pert = y_mid + perturbation * Ly * np.sin(k_x * x)
+
+    # Perturbed vorticity
+    arg_pert = (y - y_pert) / delta
+    zeta = -1.0 / (delta * np.cosh(arg_pert)**2)
+
+    return zeta
 
 
 def random_turbulence(nx: int, ny: int,
