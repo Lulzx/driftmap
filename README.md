@@ -12,6 +12,7 @@ This project demonstrates the VPFM method's advantages for plasma turbulence sim
 - **Material conservation**: Exploits the fact that potential vorticity is materially conserved
 - **Reduced numerical dissipation**: Lagrangian particles avoid grid-scale diffusion
 - **Correct zonal flow physics**: Arakawa scheme conserves both energy and enstrophy
+- **High performance**: Numba JIT-compiled kernels for fast P2G/G2P transfers and flow map evolution
 
 ### The Mathematical Isomorphism
 
@@ -97,6 +98,8 @@ Requirements:
 - scipy >= 1.7
 - matplotlib >= 3.4
 - pytest >= 6.0
+- numba >= 0.56
+- tqdm >= 4.60
 
 ## Usage
 
@@ -106,8 +109,12 @@ Requirements:
 from vpfm import Simulation, lamb_oseen
 import numpy as np
 
-# Create simulation
-sim = Simulation(nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01)
+# Create simulation with B-spline kernels and RK4 Jacobian evolution
+sim = Simulation(
+    nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01,
+    kernel_order='quadratic',  # 'linear', 'quadratic', or 'cubic'
+    track_hessian=True,        # Track Hessian for gradient accuracy
+)
 
 # Set initial condition (Gaussian vortex)
 def ic(x, y):
@@ -117,42 +124,49 @@ sim.set_initial_condition(ic)
 sim.run(n_steps=1000, diag_interval=10, verbose=True)
 ```
 
-### Higher-Order Methods (SimulationV2)
+### Hasegawa-Wakatani (Full Turbulence Physics)
+
+The unified `Simulation` class supports both HM and HW physics:
 
 ```python
-from vpfm import SimulationV2
+from vpfm import Simulation, lamb_oseen
 import numpy as np
 
-# Create simulation with B-spline kernels and RK4 Jacobian evolution
-sim = SimulationV2(
-    nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01,
-    kernel_order='quadratic',  # 'linear', 'quadratic', or 'cubic'
-    track_hessian=True,        # Track Hessian for gradient accuracy
-    reinit_threshold=2.0,      # ||J-I|| threshold for reinitialization
-    max_reinit_steps=200,      # Max steps between reinits
+# Create simulation with HW physics parameters
+sim = Simulation(
+    nx=128, ny=128, Lx=20*np.pi, Ly=20*np.pi, dt=0.02,
+    kernel_order='quadratic',
+    # Hasegawa-Wakatani physics
+    alpha=1.0,      # Adiabaticity (resistive coupling)
+    kappa=0.1,      # Curvature drive (interchange instability)
+    mu=1e-4,        # Hyperviscosity
+    D=1e-4,         # Density diffusion
+    nu_sheath=0.0,  # Sheath damping (parallel losses)
 )
 
-sim.set_initial_condition(ic)
-sim.run(n_steps=1000, diag_interval=10, verbose=True)
+# Set initial conditions for vorticity and density
+def zeta_ic(x, y):
+    return lamb_oseen(x, y, 10*np.pi, 10*np.pi, Gamma=1.0, r0=2.0)
+
+def n_ic(x, y):
+    # Offset density to seed instability
+    return lamb_oseen(x, y, 10*np.pi + 0.5, 10*np.pi, Gamma=0.8, r0=2.5)
+
+sim.set_initial_condition_hw(zeta_ic, n_ic)
+sim.run_hw(n_steps=5000, diag_interval=10, verbose=True)
+
+# Get HW-specific diagnostics
+diag = sim.compute_hw_diagnostics()
+print(f"Particle flux: {diag['particle_flux']:.2e}")
+print(f"Zonal flow energy: {diag['zonal_energy']:.2e}")
 ```
 
-### Hasegawa-Wakatani (Full Physics)
-
-```python
-from vpfm import HWSimulation
-import numpy as np
-
-sim = HWSimulation(
-    nx=128, ny=128, Lx=40*np.pi, Ly=40*np.pi, dt=0.02,
-    alpha=0.5,      # Adiabaticity
-    kappa=0.05,     # Curvature drive
-    nu_sheath=0.01, # Sheath damping
-)
-
-# Set random perturbation to seed instability
-from vpfm.hasegawa_wakatani import hw_random_perturbation
-# ... (see examples/run_hasegawa_wakatani.py)
-```
+**Key HW Physics:**
+- `alpha`: Resistive coupling α(φ - n) drives drift-wave instability
+- `kappa`: Curvature drive -κ·∂φ/∂y (interchange instability)
+- `mu`: Hyperviscosity -μ∇⁴ζ (small-scale dissipation)
+- `D`: Density diffusion D∇²n
+- `nu_sheath`: Sheath damping -ν·ζ (parallel losses)
 
 ### Flux Diagnostics
 
@@ -193,16 +207,14 @@ driftmap/
 ├── vpfm/                      # Core VPFM implementation
 │   ├── grid.py               # Eulerian grid
 │   ├── particles.py          # Lagrangian vortex particles
-│   ├── transfers.py          # P2G and G2P operations (linear)
-│   ├── kernels.py            # B-spline interpolation kernels
+│   ├── transfers.py          # P2G and G2P operations (bilinear)
+│   ├── kernels.py            # B-spline kernels (Numba JIT)
 │   ├── poisson.py            # FFT Poisson solver
 │   ├── velocity.py           # E×B velocity computation
 │   ├── integrator.py         # RK4 time integration
-│   ├── flow_map.py           # Advanced flow map (RK4 Jacobian, Hessian)
+│   ├── flow_map.py           # Flow map evolution (Numba JIT)
 │   ├── diagnostics.py        # Energy, enstrophy metrics
-│   ├── simulation.py         # Hasegawa-Mima simulation (v1)
-│   ├── simulation_v2.py      # Improved simulation (B-spline/RK4)
-│   ├── hasegawa_wakatani.py  # Full HW model
+│   ├── simulation.py         # Unified HM + HW simulation
 │   ├── arakawa.py            # Enstrophy-conserving Jacobian
 │   └── flux_diagnostics.py   # Virtual probes, blob detection
 ├── baseline/                  # Finite difference comparison
@@ -215,13 +227,25 @@ driftmap/
 
 The VPFM algorithm per timestep:
 
-1. **P2G Transfer**: Interpolate vorticity from particles to grid
-2. **Poisson Solve**: Solve ∇²φ = ζ for potential
+### Hasegawa-Mima (`sim.advance()`)
+1. **P2G Transfer**: Interpolate vorticity from particles to grid (B-spline)
+2. **Poisson Solve**: Solve (∇² - 1)φ = -q for HM potential
 3. **Velocity Computation**: v = ẑ × ∇φ (E×B drift)
-4. **Source Terms**: Apply α(φ-n), curvature drive, dissipation
-5. **Particle Advection**: RK4 integration of positions
-6. **Jacobian Evolution**: dJ/dt = -J·∇v
-7. **Reinitialization**: Reset flow map when ||J-I|| exceeds threshold
+4. **Particle Advection**: RK4 integration of positions
+5. **Jacobian Evolution**: dJ/dt = -J·∇v (RK4)
+6. **Reinitialization**: Reset flow map when ||J-I|| exceeds threshold
+
+### Hasegawa-Wakatani (`sim.step_hw()`)
+1. **P2G Transfer**: Interpolate vorticity AND density to grid
+2. **Poisson Solve**: Solve ∇²φ = ζ for HW potential
+3. **Velocity Computation**: v = ẑ × ∇φ (E×B drift)
+4. **Source Terms**: Compute α(φ-n), curvature drive, dissipation
+5. **Update Particles**: Apply source terms to particle vorticity/density
+6. **Particle Advection**: RK4 integration (EXACT vorticity transport)
+7. **Jacobian Evolution**: dJ/dt = -J·∇v
+8. **Reinitialization**: Reset flow map when needed
+
+**Key insight**: Step 6 preserves particle values exactly (Dω/Dt = 0), while step 5 adds the physics that drives turbulence (α(φ-n) ≠ 0 when density-potential coupling breaks down).
 
 ## Experimental Validation Targets
 
@@ -251,8 +275,25 @@ Typical experimental values:
 | Virtual probe diagnostics | ✅ |
 | Blob detection | ✅ |
 | Zonal flow analysis | ✅ |
+| Numba JIT acceleration | ✅ |
 | GPU acceleration | 🔜 |
 | 3D extension | 🔜 |
+
+## Performance
+
+The implementation uses Numba JIT compilation for performance-critical operations:
+
+| Grid Size | Particles | Time/Step | Steps/sec |
+|-----------|-----------|-----------|-----------|
+| 32×32 | 1,024 | 20 ms | 50 |
+| 64×64 | 4,096 | 58 ms | 17 |
+| 128×128 | 16,384 | 207 ms | 4.8 |
+| 256×256 | 65,536 | 806 ms | 1.2 |
+
+Run the benchmark:
+```bash
+python examples/benchmark_numba.py
+```
 
 ## References
 
