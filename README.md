@@ -8,10 +8,10 @@ An implementation adapting [Vortex Particle Flow Maps](https://arxiv.org/abs/250
 
 This project demonstrates the VPFM method's advantages for plasma turbulence simulation:
 
-- **Perfect structure preservation**: VPFM maintains vortex structures (blobs) with 100% peak preservation vs 49% for finite-difference
+- **Superior structure preservation**: VPFM maintains vortex structures (blobs) with 92% peak preservation vs 62% for finite-difference (1.5x better)
 - **Material conservation**: Exploits the fact that potential vorticity is materially conserved (Dω/Dt = 0)
 - **Reduced numerical dissipation**: Lagrangian particles avoid grid-scale diffusion entirely
-- **Energy/enstrophy conservation**: 13x better energy conservation, 12x better enstrophy conservation than FD methods
+- **Energy/enstrophy conservation**: 5x better energy conservation, 5x better enstrophy conservation than FD methods
 - **GPU acceleration**: Up to 27x speedup on Apple Silicon (MLX) or NVIDIA GPUs (CuPy)
 - **3D support**: Full 3D simulation with parallel dynamics
 
