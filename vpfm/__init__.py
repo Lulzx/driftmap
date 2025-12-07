@@ -22,7 +22,10 @@ from .kernels import (
     InterpolationKernel, P2G_bspline, G2P_bspline,
     P2G_bspline_gradient_enhanced, G2P_bspline_with_gradient
 )
-from .flow_map import FlowMapIntegrator, FlowMapState
+from .flow_map import (
+    FlowMapIntegrator, FlowMapState,
+    DualScaleFlowMapIntegrator, DualScaleFlowMapState,
+)
 
 # Backend abstraction (CPU/GPU)
 from .backend import (
@@ -92,6 +95,8 @@ __all__ = [
     "G2P_bspline_with_gradient",
     "FlowMapIntegrator",
     "FlowMapState",
+    "DualScaleFlowMapIntegrator",
+    "DualScaleFlowMapState",
     # Enstrophy-conserving schemes
     "arakawa_jacobian",
     "compute_poisson_bracket",

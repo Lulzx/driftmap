@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vpfm.simulation import Simulation, lamb_oseen, vortex_pair, kelvin_helmholtz, random_turbulence
 from vpfm.diagnostics import find_vortex_centroid, find_vortex_peak
+from vpfm.flow_map import DualScaleFlowMapIntegrator, DualScaleFlowMapState, _compose_jacobians
+from vpfm.grid import Grid
+from vpfm.particles import ParticleSystem
 from baseline.finite_diff import FiniteDifferenceSimulation
 
 
@@ -212,6 +215,125 @@ class TestGradientEnhancedP2G:
         sim.run(20, diag_interval=10, verbose=False)
 
         assert np.all(np.isfinite(sim.grid.q))
+
+
+class TestDualScaleFlowMap:
+    """Tests for dual-scale flow map integrator."""
+
+    def test_jacobian_composition(self):
+        """Test that Jacobian composition works correctly."""
+        n = 10
+
+        # Create two random Jacobians
+        np.random.seed(42)
+        J1 = np.eye(2)[np.newaxis, :, :].repeat(n, axis=0) + 0.1 * np.random.randn(n, 2, 2)
+        J2 = np.eye(2)[np.newaxis, :, :].repeat(n, axis=0) + 0.1 * np.random.randn(n, 2, 2)
+
+        # Compose using our function
+        J_composed = _compose_jacobians(J1, J2)
+
+        # Verify against numpy matmul
+        J_expected = np.matmul(J1, J2)
+
+        np.testing.assert_allclose(J_composed, J_expected, rtol=1e-10)
+
+    def test_dual_scale_initialization(self):
+        """Test dual-scale flow map initializes correctly."""
+        nx, ny = 32, 32
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+
+        grid = Grid(nx, ny, Lx, Ly)
+        integrator = DualScaleFlowMapIntegrator(
+            grid, kernel_order='quadratic',
+            n_L=100, n_S=20
+        )
+
+        n_particles = nx * ny
+        flow_map = integrator.initialize_flow_map(n_particles)
+
+        # Check that Jacobians are identity
+        np.testing.assert_allclose(flow_map.J_long[:, 0, 0], 1.0)
+        np.testing.assert_allclose(flow_map.J_long[:, 1, 1], 1.0)
+        np.testing.assert_allclose(flow_map.J_short[:, 0, 0], 1.0)
+        np.testing.assert_allclose(flow_map.J_short[:, 1, 1], 1.0)
+
+        assert flow_map.steps_since_long_reinit == 0
+        assert flow_map.steps_since_short_reinit == 0
+
+    def test_dual_scale_step(self):
+        """Test that dual-scale integrator can advance."""
+        nx, ny = 16, 16
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+        dt = 0.01
+
+        grid = Grid(nx, ny, Lx, Ly)
+        particles = ParticleSystem.from_grid(grid, particles_per_cell=1)
+
+        # Set up a simple vortex flow on grid
+        x = np.linspace(grid.dx/2, Lx - grid.dx/2, nx)
+        y = np.linspace(grid.dy/2, Ly - grid.dy/2, ny)
+        X, Y = np.meshgrid(x, y, indexing='ij')
+        grid.q = lamb_oseen(X, Y, Lx/2, Ly/2, Gamma=2*np.pi, r0=0.5)
+
+        # Solve for velocity
+        from vpfm.poisson import solve_poisson_hm
+        from vpfm.velocity import compute_velocity, compute_velocity_gradient
+        grid.phi = solve_poisson_hm(grid.q, Lx, Ly)
+        compute_velocity(grid)
+        compute_velocity_gradient(grid)
+
+        integrator = DualScaleFlowMapIntegrator(
+            grid, kernel_order='quadratic',
+            n_L=50, n_S=10
+        )
+
+        flow_map = integrator.initialize_flow_map(particles.n_particles)
+
+        # Take a few steps
+        for _ in range(5):
+            integrator.step(particles, flow_map, dt)
+
+        assert flow_map.steps_since_short_reinit == 5
+        assert flow_map.steps_since_long_reinit == 5
+
+        # Jacobian should have deviated from identity
+        J_error = np.max(np.abs(flow_map.J_short - np.eye(2)))
+        assert J_error > 0  # Should have changed
+
+    def test_short_reinit_composes_jacobians(self):
+        """Test that short reinit composes Jacobians correctly."""
+        nx, ny = 16, 16
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+
+        grid = Grid(nx, ny, Lx, Ly)
+        n_particles = nx * ny
+
+        integrator = DualScaleFlowMapIntegrator(grid, n_L=100, n_S=20)
+        flow_map = integrator.initialize_flow_map(n_particles)
+
+        # Manually set some non-identity Jacobians
+        np.random.seed(42)
+        flow_map.J_long[:] = np.eye(2) + 0.1 * np.random.randn(n_particles, 2, 2)
+        flow_map.J_short[:] = np.eye(2) + 0.05 * np.random.randn(n_particles, 2, 2)
+
+        J_long_before = flow_map.J_long.copy()
+        J_short_before = flow_map.J_short.copy()
+
+        # Expected composed Jacobian
+        J_expected = np.matmul(J_short_before, J_long_before)
+
+        # Do short reinit
+        particles = ParticleSystem.from_grid(grid, particles_per_cell=1)
+        integrator.reinit_short(particles, flow_map, grid.q)
+
+        # J_long should now be the composition
+        np.testing.assert_allclose(flow_map.J_long, J_expected, rtol=1e-10)
+
+        # J_short should be identity
+        np.testing.assert_allclose(flow_map.J_short[:, 0, 0], 1.0, rtol=1e-10)
+        np.testing.assert_allclose(flow_map.J_short[:, 1, 1], 1.0, rtol=1e-10)
+        np.testing.assert_allclose(flow_map.J_short[:, 0, 1], 0.0, atol=1e-10)
+        np.testing.assert_allclose(flow_map.J_short[:, 1, 0], 0.0, atol=1e-10)
 
 
 class TestTurbulence:

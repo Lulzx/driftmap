@@ -36,6 +36,40 @@ class FlowMapState:
     cumulative_error: float = 0.0
 
 
+@dataclass
+class DualScaleFlowMapState:
+    """Dual-scale flow map state for improved accuracy.
+
+    Maintains two timescales:
+    - Long flow map (n_L): For vorticity values, reinitialized less frequently
+    - Short flow map (n_S): For vorticity gradients, reinitialized more frequently
+
+    This allows longer stable flow maps while maintaining gradient accuracy.
+    At short reinitialization, Jacobians are composed: J_long = J_short · J_long
+
+    Reference: Wang et al. (2025) Section 4.3.3
+    """
+    # Long flow map for vorticity (reinitialized less frequently)
+    J_long: np.ndarray  # (n_particles, 2, 2)
+    steps_since_long_reinit: int = 0
+
+    # Short flow map for gradients (reinitialized more frequently)
+    J_short: np.ndarray = None  # (n_particles, 2, 2)
+    H_short: Optional[np.ndarray] = None  # (n_particles, 2, 2, 2)
+    steps_since_short_reinit: int = 0
+
+    # Cumulative Jacobian from long to current: J_total = J_short · J_long
+    # Used for pulling back vorticity from initial to current configuration
+
+    def __post_init__(self):
+        """Initialize short arrays if not provided."""
+        if self.J_short is None:
+            n = self.J_long.shape[0]
+            self.J_short = np.zeros((n, 2, 2))
+            self.J_short[:, 0, 0] = 1.0
+            self.J_short[:, 1, 1] = 1.0
+
+
 # =============================================================================
 # Numba-optimized functions for flow map evolution
 # =============================================================================
@@ -170,6 +204,44 @@ def _reset_jacobian(J: np.ndarray):
         J[p, 0, 1] = 0.0
         J[p, 1, 0] = 0.0
         J[p, 1, 1] = 1.0
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _compose_jacobians(J_short: np.ndarray, J_long: np.ndarray) -> np.ndarray:
+    """Compose Jacobians: J_composed = J_short · J_long.
+
+    This implements the flow map composition F^[a,c] = F^[b,c] ∘ F^[a,b]
+    which gives J^[a,c] = J^[b,c] · J^[a,b]
+
+    Args:
+        J_short: Short-term Jacobian J^[b,c] (n, 2, 2)
+        J_long: Long-term Jacobian J^[a,b] (n, 2, 2)
+
+    Returns:
+        Composed Jacobian J^[a,c] = J_short · J_long (n, 2, 2)
+    """
+    n = J_short.shape[0]
+    J_composed = np.empty_like(J_short)
+
+    for p in prange(n):
+        # 2x2 matrix multiplication (unrolled for speed)
+        J_composed[p, 0, 0] = J_short[p, 0, 0] * J_long[p, 0, 0] + J_short[p, 0, 1] * J_long[p, 1, 0]
+        J_composed[p, 0, 1] = J_short[p, 0, 0] * J_long[p, 0, 1] + J_short[p, 0, 1] * J_long[p, 1, 1]
+        J_composed[p, 1, 0] = J_short[p, 1, 0] * J_long[p, 0, 0] + J_short[p, 1, 1] * J_long[p, 1, 0]
+        J_composed[p, 1, 1] = J_short[p, 1, 0] * J_long[p, 0, 1] + J_short[p, 1, 1] * J_long[p, 1, 1]
+
+    return J_composed
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _copy_jacobian(J_src: np.ndarray, J_dst: np.ndarray):
+    """Copy Jacobian array in-place."""
+    n = J_src.shape[0]
+    for p in prange(n):
+        J_dst[p, 0, 0] = J_src[p, 0, 0]
+        J_dst[p, 0, 1] = J_src[p, 0, 1]
+        J_dst[p, 1, 0] = J_src[p, 1, 0]
+        J_dst[p, 1, 1] = J_src[p, 1, 1]
 
 
 class FlowMapIntegrator:
@@ -452,3 +524,203 @@ class FlowMapIntegrator:
                                   self.grid.dx, self.grid.dy, self.kernel)
 
         return new_values
+
+
+class DualScaleFlowMapIntegrator:
+    """Dual-scale flow map integrator for improved accuracy.
+
+    Maintains two timescales:
+    - Long flow map (n_L): For vorticity values, reinitialized less frequently (every n_L steps)
+    - Short flow map (n_S): For vorticity gradients, reinitialized more frequently (every n_S steps)
+
+    When the short map is reinitialized, the Jacobians are composed:
+        J_long_new = J_short · J_long_old
+
+    This allows longer stable flow maps (better vorticity preservation) while
+    maintaining gradient accuracy through more frequent short-map reinitialization.
+
+    Typical settings: n_L = 100-200, n_S = 20-50 (ratio 3-12x)
+
+    Reference: Wang et al. (2025) Section 4.3.3
+    """
+
+    def __init__(self, grid: Grid, kernel_order: str = 'quadratic',
+                 track_hessian: bool = True,
+                 n_L: int = 100,  # Long map reinit interval
+                 n_S: int = 20,   # Short map reinit interval
+                 error_threshold_long: float = 3.0,
+                 error_threshold_short: float = 1.0):
+        """Initialize dual-scale integrator.
+
+        Args:
+            grid: Computational grid
+            kernel_order: 'linear', 'quadratic', or 'cubic'
+            track_hessian: Whether to track Hessian for gradient accuracy
+            n_L: Maximum steps between long map reinitializations
+            n_S: Maximum steps between short map reinitializations
+            error_threshold_long: Error threshold for long map reinit
+            error_threshold_short: Error threshold for short map reinit
+        """
+        self.grid = grid
+        self.kernel = InterpolationKernel(kernel_order)
+        self.track_hessian = track_hessian
+
+        self.n_L = n_L
+        self.n_S = n_S
+        self.error_threshold_long = error_threshold_long
+        self.error_threshold_short = error_threshold_short
+
+        # Internal single-scale integrator for actual evolution
+        self._integrator = FlowMapIntegrator(grid, kernel_order, track_hessian)
+
+        # Preallocate arrays
+        self._grad_v = None
+        self._n_particles = 0
+
+    def initialize_flow_map(self, n_particles: int) -> DualScaleFlowMapState:
+        """Initialize dual-scale flow map state for particles."""
+        # Long Jacobian
+        J_long = np.zeros((n_particles, 2, 2))
+        J_long[:, 0, 0] = 1.0
+        J_long[:, 1, 1] = 1.0
+
+        # Short Jacobian
+        J_short = np.zeros((n_particles, 2, 2))
+        J_short[:, 0, 0] = 1.0
+        J_short[:, 1, 1] = 1.0
+
+        # Hessian (only for short map)
+        H_short = None
+        if self.track_hessian:
+            H_short = np.zeros((n_particles, 2, 2, 2))
+
+        self._n_particles = n_particles
+
+        return DualScaleFlowMapState(
+            J_long=J_long,
+            J_short=J_short,
+            H_short=H_short,
+            steps_since_long_reinit=0,
+            steps_since_short_reinit=0,
+        )
+
+    def step(self, particles: ParticleSystem, flow_map: DualScaleFlowMapState, dt: float):
+        """Advance dual-scale flow map by one timestep.
+
+        Evolves the short Jacobian (and Hessian) using RK4, then advects particles.
+        """
+        # Create temporary single-scale state for evolution
+        temp_state = FlowMapState(
+            J=flow_map.J_short,
+            H=flow_map.H_short,
+            steps_since_reinit=flow_map.steps_since_short_reinit
+        )
+
+        # Evolve using single-scale integrator
+        self._integrator.evolve_jacobian_rk4(particles, temp_state, dt)
+
+        # Copy the updated Jacobian back (evolve_jacobian_rk4 creates new array)
+        np.copyto(flow_map.J_short, temp_state.J)
+
+        if self.track_hessian and flow_map.H_short is not None:
+            temp_state.H = flow_map.H_short
+            self._integrator.evolve_hessian(particles, temp_state, dt)
+            # Hessian is updated in-place, but copy back just in case
+            np.copyto(flow_map.H_short, temp_state.H)
+
+        # Advect particles
+        self._integrator.advect_particles_rk4(particles, dt)
+
+        # Update step counters
+        flow_map.steps_since_short_reinit += 1
+        flow_map.steps_since_long_reinit += 1
+
+    def estimate_short_error(self, flow_map: DualScaleFlowMapState) -> float:
+        """Estimate short flow map error."""
+        J_error = _estimate_jacobian_error(flow_map.J_short)
+
+        H_error = 0.0
+        if flow_map.H_short is not None:
+            H_error = np.max(np.sqrt(np.sum(flow_map.H_short**2, axis=(1, 2, 3))))
+
+        return J_error + 0.1 * H_error
+
+    def estimate_long_error(self, flow_map: DualScaleFlowMapState) -> float:
+        """Estimate cumulative (long) flow map error.
+
+        Uses the composed Jacobian J_total = J_short · J_long
+        """
+        J_total = _compose_jacobians(flow_map.J_short, flow_map.J_long)
+        return _estimate_jacobian_error(J_total)
+
+    def should_reinit_short(self, flow_map: DualScaleFlowMapState) -> bool:
+        """Check if short flow map should be reinitialized."""
+        if flow_map.steps_since_short_reinit >= self.n_S:
+            return True
+        return self.estimate_short_error(flow_map) > self.error_threshold_short
+
+    def should_reinit_long(self, flow_map: DualScaleFlowMapState) -> bool:
+        """Check if long flow map should be reinitialized."""
+        if flow_map.steps_since_long_reinit >= self.n_L:
+            return True
+        return self.estimate_long_error(flow_map) > self.error_threshold_long
+
+    def reinit_short(self, particles: ParticleSystem, flow_map: DualScaleFlowMapState,
+                     grid_field: np.ndarray):
+        """Reinitialize short flow map.
+
+        Composes the short Jacobian into the long Jacobian before resetting:
+            J_long_new = J_short · J_long_old
+
+        Then resets J_short to identity and updates particle gradients from grid.
+        """
+        # Compose Jacobians: J_long = J_short · J_long
+        J_composed = _compose_jacobians(flow_map.J_short, flow_map.J_long)
+        _copy_jacobian(J_composed, flow_map.J_long)
+
+        # Reset short Jacobian to identity
+        _reset_jacobian(flow_map.J_short)
+
+        # Reset Hessian to zero
+        if flow_map.H_short is not None:
+            flow_map.H_short.fill(0.0)
+
+        flow_map.steps_since_short_reinit = 0
+
+        # Update particle gradients from grid (if gradient tracking enabled)
+        # The vorticity values are NOT updated here - that happens at long reinit
+
+    def reinit_long(self, particles: ParticleSystem, flow_map: DualScaleFlowMapState,
+                    grid_field: np.ndarray) -> np.ndarray:
+        """Reinitialize long flow map.
+
+        This is a full reinitialization:
+        1. Reset both J_long and J_short to identity
+        2. Reset Hessian to zero
+        3. Update particle vorticity from grid
+
+        Returns:
+            New particle vorticity values interpolated from grid
+        """
+        # Reset long Jacobian to identity
+        _reset_jacobian(flow_map.J_long)
+
+        # Reset short Jacobian to identity
+        _reset_jacobian(flow_map.J_short)
+
+        # Reset Hessian to zero
+        if flow_map.H_short is not None:
+            flow_map.H_short.fill(0.0)
+
+        flow_map.steps_since_long_reinit = 0
+        flow_map.steps_since_short_reinit = 0
+
+        # Interpolate current grid field to particles
+        new_values = G2P_bspline(grid_field, particles.x, particles.y,
+                                  self.grid.dx, self.grid.dy, self.kernel)
+
+        return new_values
+
+    def get_total_jacobian(self, flow_map: DualScaleFlowMapState) -> np.ndarray:
+        """Get the total (composed) Jacobian J_total = J_short · J_long."""
+        return _compose_jacobians(flow_map.J_short, flow_map.J_long)
