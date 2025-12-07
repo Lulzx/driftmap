@@ -53,40 +53,43 @@ Features:
 
 ![Benchmark Results](benchmark_results.png)
 
-### Material Conservation Test
+![Benchmark Summary](benchmark_summary.png)
 
-The core advantage of VPFM is **exact material conservation** on Lagrangian particles. Testing with a Lamb-Oseen (Gaussian) vortex:
-
-| Method | Peak @ t=5.0 | Peak @ t=10.0 |
-|--------|--------------|---------------|
-| **VPFM** | **100.0%** | **100.0%** |
-| FD Upwind | 49.3% | 34.0% |
-| FD Central | 100.0% | ~100% |
-
-**VPFM achieves perfect material conservation** - particles preserve potential vorticity exactly, while finite-difference upwind loses over 50% of peak vorticity due to numerical diffusion.
-
-### Lamb-Oseen Vortex Test
-
-Single Gaussian vortex stability comparing VPFM vs finite-difference:
-
-![Lamb-Oseen Comparison](lamb_oseen_comparison.png)
-
-| Method | Peak Preservation |
-|--------|-------------------|
-| VPFM | 100.0% |
-| FD Upwind | 49.3% |
-| FD Central | 100.0% |
-
-### Decaying Turbulence Test
-
-Random initial condition with energy/enstrophy conservation (t=3.0):
-
-![Turbulence Comparison](turbulence_comparison.png)
+### VPFM vs Finite Difference
 
 | Metric | VPFM | FD Upwind | VPFM Advantage |
 |--------|------|-----------|----------------|
-| Energy error | 0.21% | 2.76% | **13x better** |
-| Enstrophy error | 0.34% | 3.94% | **12x better** |
+| Peak preservation | 91.7% | 61.9% | **1.5x** |
+| Energy error | 10.4% | 50.5% | **4.9x** |
+| Enstrophy error | 11.7% | 53.8% | **4.6x** |
+
+### Flow Map Methods
+
+The dual-scale flow map integrator maintains two timescales for improved accuracy:
+- **Long map (n_L)**: For vorticity values, reinitialized less frequently
+- **Short map (n_S)**: For gradients, reinitialized more frequently
+
+| Method | Avg Error | Max Error | Reinits |
+|--------|-----------|-----------|---------|
+| Standard | 0.2585 | 0.5098 | 7 |
+| Dual-Scale | 0.0000 | 0.0000 | 10S/2L |
+
+### P2G Transfer Methods
+
+Gradient-enhanced P2G includes local gradient information for improved accuracy:
+
+| Method | Peak Preservation |
+|--------|-------------------|
+| Standard P2G | 91.7% |
+| Gradient-Enhanced P2G | 91.8% |
+
+### Hasegawa-Wakatani Physics
+
+The HW model includes:
+- Resistive coupling α(φ - n) driving drift-wave instability
+- Curvature drive κ·∂φ/∂y for interchange instability
+- Zonal flow generation from Reynolds stress
+- Particle flux diagnostics
 
 ## Installation
 
@@ -197,8 +200,14 @@ python examples/run_leapfrog.py
 # Decaying turbulence (conservation)
 python examples/run_turbulence.py
 
+# Kelvin-Helmholtz instability
+python examples/run_kelvin_helmholtz.py
+
 # Full Hasegawa-Wakatani turbulence
 python examples/run_hasegawa_wakatani.py
+
+# Comprehensive feature benchmarks
+python examples/benchmark_features.py
 ```
 
 ## Project Structure
@@ -276,6 +285,10 @@ Typical experimental values:
 | RK4 Jacobian evolution | ✅ |
 | Hessian tracking | ✅ |
 | Adaptive reinitialization | ✅ |
+| **Dual-scale flow maps (n_L/n_S)** | ✅ |
+| **Gradient-enhanced P2G transfer** | ✅ |
+| **Adaptive time stepping** | ✅ |
+| **Kelvin-Helmholtz test case** | ✅ |
 | Sheath boundary damping | ✅ |
 | Virtual probe diagnostics | ✅ |
 | Blob detection | ✅ |
