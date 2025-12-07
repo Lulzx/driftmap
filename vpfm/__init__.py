@@ -21,15 +21,30 @@ from .kernels import InterpolationKernel, P2G_bspline, G2P_bspline
 from .flow_map import FlowMapIntegrator, FlowMapState
 
 # Backend abstraction (CPU/GPU)
-from .backend import get_backend, set_backend, get_backend_name, to_cpu, to_gpu
+from .backend import (
+    get_backend, set_backend, get_backend_name,
+    to_cpu, to_gpu, is_gpu_backend, synchronize,
+)
 
-# GPU kernels (optional, requires CuPy)
+# GPU kernels - CUDA (optional, requires CuPy)
 from .kernels_gpu import (
-    check_gpu_available,
+    check_gpu_available as check_cuda_available,
     P2G_gpu,
     G2P_gpu,
     jacobian_rhs_gpu,
     rk4_positions_gpu,
+)
+
+# GPU kernels - MLX (optional, requires MLX on Apple Silicon)
+from .kernels_mlx import (
+    check_mlx_available,
+    P2G_mlx,
+    G2P_mlx,
+    jacobian_rhs_mlx,
+    rk4_positions_mlx,
+    solve_poisson_mlx,
+    to_mlx,
+    to_numpy,
 )
 
 # 3D extension
@@ -83,12 +98,23 @@ __all__ = [
     "get_backend_name",
     "to_cpu",
     "to_gpu",
-    # GPU kernels
-    "check_gpu_available",
+    "is_gpu_backend",
+    "synchronize",
+    # GPU kernels - CUDA
+    "check_cuda_available",
     "P2G_gpu",
     "G2P_gpu",
     "jacobian_rhs_gpu",
     "rk4_positions_gpu",
+    # GPU kernels - MLX (Apple Silicon)
+    "check_mlx_available",
+    "P2G_mlx",
+    "G2P_mlx",
+    "jacobian_rhs_mlx",
+    "rk4_positions_mlx",
+    "solve_poisson_mlx",
+    "to_mlx",
+    "to_numpy",
     # 3D extension
     "Simulation3D",
     "Grid3D",
