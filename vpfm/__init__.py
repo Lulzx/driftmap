@@ -20,7 +20,29 @@ from .flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
 from .kernels import InterpolationKernel, P2G_bspline, G2P_bspline
 from .flow_map import FlowMapIntegrator, FlowMapState
 
-__version__ = "0.4.0"
+# Backend abstraction (CPU/GPU)
+from .backend import get_backend, set_backend, get_backend_name, to_cpu, to_gpu
+
+# GPU kernels (optional, requires CuPy)
+from .kernels_gpu import (
+    check_gpu_available,
+    P2G_gpu,
+    G2P_gpu,
+    jacobian_rhs_gpu,
+    rk4_positions_gpu,
+)
+
+# 3D extension
+from .simulation3d import (
+    Simulation3D,
+    Grid3D,
+    Particles3D,
+    FlowMap3D,
+    gaussian_blob_3d,
+    random_turbulence_3d,
+)
+
+__version__ = "0.5.0"
 __all__ = [
     # Core components
     "Grid",
@@ -55,4 +77,23 @@ __all__ = [
     "VirtualProbe",
     "BlobDetector",
     "FluxStatistics",
+    # Backend (CPU/GPU)
+    "get_backend",
+    "set_backend",
+    "get_backend_name",
+    "to_cpu",
+    "to_gpu",
+    # GPU kernels
+    "check_gpu_available",
+    "P2G_gpu",
+    "G2P_gpu",
+    "jacobian_rhs_gpu",
+    "rk4_positions_gpu",
+    # 3D extension
+    "Simulation3D",
+    "Grid3D",
+    "Particles3D",
+    "FlowMap3D",
+    "gaussian_blob_3d",
+    "random_turbulence_3d",
 ]

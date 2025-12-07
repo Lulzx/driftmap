@@ -209,12 +209,15 @@ driftmap/
 │   ├── particles.py          # Lagrangian vortex particles
 │   ├── transfers.py          # P2G and G2P operations (bilinear)
 │   ├── kernels.py            # B-spline kernels (Numba JIT)
+│   ├── kernels_gpu.py        # GPU kernels (CuPy/CUDA)
+│   ├── backend.py            # CPU/GPU backend abstraction
 │   ├── poisson.py            # FFT Poisson solver
 │   ├── velocity.py           # E×B velocity computation
 │   ├── integrator.py         # RK4 time integration
 │   ├── flow_map.py           # Flow map evolution (Numba JIT)
 │   ├── diagnostics.py        # Energy, enstrophy metrics
-│   ├── simulation.py         # Unified HM + HW simulation
+│   ├── simulation.py         # Unified 2D HM + HW simulation
+│   ├── simulation3d.py       # 3D VPFM simulation
 │   ├── arakawa.py            # Enstrophy-conserving Jacobian
 │   └── flux_diagnostics.py   # Virtual probes, blob detection
 ├── baseline/                  # Finite difference comparison
@@ -276,8 +279,8 @@ Typical experimental values:
 | Blob detection | ✅ |
 | Zonal flow analysis | ✅ |
 | Numba JIT acceleration | ✅ |
-| GPU acceleration | 🔜 |
-| 3D extension | 🔜 |
+| GPU acceleration (CuPy) | ✅ |
+| 3D extension | ✅ |
 
 ## Performance
 
@@ -293,6 +296,49 @@ The implementation uses Numba JIT compilation for performance-critical operation
 Run the benchmark:
 ```bash
 python examples/benchmark_numba.py
+```
+
+### GPU Acceleration
+
+GPU support is available via CuPy (optional). Install with:
+```bash
+pip install cupy-cuda11x  # For CUDA 11.x
+# or
+pip install cupy-cuda12x  # For CUDA 12.x
+```
+
+Usage:
+```python
+from vpfm import check_gpu_available, set_backend
+
+if check_gpu_available():
+    set_backend('gpu')  # Use GPU
+    print("Running on GPU")
+else:
+    set_backend('cpu')  # Fall back to CPU
+```
+
+### 3D Simulation
+
+For 3D turbulence with parallel dynamics:
+
+```python
+from vpfm import Simulation3D, gaussian_blob_3d
+import numpy as np
+
+sim = Simulation3D(
+    nx=64, ny=64, nz=32,
+    Lx=2*np.pi, Ly=2*np.pi, Lz=2*np.pi,
+    dt=0.01,
+    cs=1.0,  # Sound speed (parallel dynamics)
+)
+
+def ic(x, y, z):
+    return gaussian_blob_3d(x, y, z, np.pi, np.pi, np.pi,
+                            amplitude=1.0, rx=0.5, ry=0.5, rz=0.5)
+
+sim.set_initial_condition(ic)
+sim.run(n_steps=1000, diag_interval=10)
 ```
 
 ## References
