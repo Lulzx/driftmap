@@ -5,6 +5,7 @@ Orchestrates the VPFM algorithm for Hasegawa-Mima equation.
 
 import numpy as np
 from typing import Callable, Optional
+from tqdm import tqdm
 from .grid import Grid
 from .particles import ParticleSystem
 from .transfers import P2G_vectorized, G2P
@@ -130,7 +131,8 @@ class Simulation:
             n_steps: int,
             diag_interval: int = 10,
             callback: Optional[Callable] = None,
-            verbose: bool = True):
+            verbose: bool = True,
+            progress: bool = True):
         """Run simulation for specified number of steps.
 
         Args:
@@ -138,8 +140,10 @@ class Simulation:
             diag_interval: Steps between diagnostic computation
             callback: Optional callback function(sim) called each diag_interval
             verbose: Print progress
+            progress: Show tqdm progress bar
         """
-        for i in range(n_steps):
+        iterator = tqdm(range(n_steps), desc="V1 Simulation", disable=not progress)
+        for i in iterator:
             self.advance()
 
             if (self.step % diag_interval == 0) or (i == n_steps - 1):
