@@ -7,7 +7,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vpfm.simulation import Simulation, lamb_oseen, vortex_pair, random_turbulence
+from vpfm.simulation import Simulation, lamb_oseen, vortex_pair, kelvin_helmholtz, random_turbulence
 from vpfm.diagnostics import find_vortex_centroid, find_vortex_peak
 from baseline.finite_diff import FiniteDifferenceSimulation
 
@@ -125,6 +125,93 @@ class TestVPFMvsFD:
 
         # Note: In some cases FD upwind can be stable, so just check VPFM is reasonable
         assert vpfm_ratio > 0.5  # VPFM should keep at least 50% of peak
+
+
+class TestKelvinHelmholtz:
+    """Tests for Kelvin-Helmholtz instability."""
+
+    def test_kh_initial_condition(self):
+        """Test KH initial condition is correctly formed."""
+        nx, ny = 64, 64
+        Lx, Ly = 4.0, 4.0
+
+        x = np.linspace(0, Lx, nx)
+        y = np.linspace(0, Ly, ny)
+        X, Y = np.meshgrid(x, y, indexing='ij')
+
+        zeta = kelvin_helmholtz(X, Y, Lx, Ly, shear_width=0.1, perturbation=0.02)
+
+        # Vorticity should be concentrated at y = Ly/2
+        y_mid = ny // 2
+        assert np.abs(zeta[:, y_mid]).max() > np.abs(zeta[:, 0]).max()
+        assert np.abs(zeta[:, y_mid]).max() > np.abs(zeta[:, -1]).max()
+
+    def test_kh_simulation_stability(self):
+        """Test KH simulation runs without blowing up."""
+        nx, ny = 32, 32
+        Lx, Ly = 4.0, 4.0
+
+        sim = Simulation(nx, ny, Lx, Ly, dt=0.01,
+                        use_gradient_p2g=True,
+                        adaptive_dt=True)
+
+        def ic(x, y):
+            return kelvin_helmholtz(x, y, Lx, Ly, shear_width=0.1, perturbation=0.02)
+
+        sim.set_initial_condition(ic)
+        sim.run(50, diag_interval=25, verbose=False)
+
+        # Should not blow up
+        assert np.all(np.isfinite(sim.grid.q))
+        energies = np.array(sim.history['energy'])
+        assert np.all(np.isfinite(energies))
+
+
+class TestAdaptiveTimestep:
+    """Tests for adaptive time stepping."""
+
+    def test_adaptive_dt_respects_cfl(self):
+        """Test adaptive dt stays within CFL limit."""
+        nx, ny = 32, 32
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+
+        sim = Simulation(nx, ny, Lx, Ly, dt=0.1,  # Large dt
+                        adaptive_dt=True, cfl_number=0.3)
+
+        def ic(x, y):
+            return lamb_oseen(x, y, Lx/2, Ly/2, Gamma=2*np.pi, r0=0.5)
+
+        sim.set_initial_condition(ic)
+
+        # Compute what dt should be
+        dt_adaptive = sim.compute_adaptive_dt()
+
+        # Should be smaller than user-specified dt
+        assert dt_adaptive <= sim.dt
+
+        # Run a few steps
+        sim.run(20, diag_interval=10, verbose=False)
+        assert np.all(np.isfinite(sim.grid.q))
+
+
+class TestGradientEnhancedP2G:
+    """Tests for gradient-enhanced P2G transfer."""
+
+    def test_gradient_p2g_runs(self):
+        """Test gradient-enhanced P2G runs without error."""
+        nx, ny = 32, 32
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+
+        sim = Simulation(nx, ny, Lx, Ly, dt=0.01,
+                        use_gradient_p2g=True)
+
+        def ic(x, y):
+            return lamb_oseen(x, y, Lx/2, Ly/2, Gamma=2*np.pi, r0=0.5)
+
+        sim.set_initial_condition(ic)
+        sim.run(20, diag_interval=10, verbose=False)
+
+        assert np.all(np.isfinite(sim.grid.q))
 
 
 class TestTurbulence:
