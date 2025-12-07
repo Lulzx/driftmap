@@ -8,9 +8,13 @@ from .velocity import compute_velocity, compute_velocity_gradient
 from .integrator import RK4Integrator
 from .diagnostics import compute_diagnostics
 from .simulation import Simulation
+from .hasegawa_wakatani import HWSimulation, DensityParticles
+from .arakawa import arakawa_jacobian, compute_poisson_bracket
+from .flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
+    # Core components
     "Grid",
     "ParticleSystem",
     "P2G",
@@ -20,5 +24,15 @@ __all__ = [
     "compute_velocity_gradient",
     "RK4Integrator",
     "compute_diagnostics",
-    "Simulation",
+    # Simulations
+    "Simulation",          # Hasegawa-Mima
+    "HWSimulation",        # Hasegawa-Wakatani
+    "DensityParticles",
+    # Enstrophy-conserving schemes
+    "arakawa_jacobian",
+    "compute_poisson_bracket",
+    # Diagnostics
+    "VirtualProbe",
+    "BlobDetector",
+    "FluxStatistics",
 ]
