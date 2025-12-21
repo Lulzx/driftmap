@@ -618,8 +618,24 @@ def _plot_results(results, output_path):
     plt.savefig(output_path, dpi=150)
 
 
-def _apply_speed_profile(cfg, fast, full):
-    if fast:
+def _apply_speed_profile(cfg, smoke, fast, full):
+    if smoke:
+        cfg.update({
+            "nx": 32,
+            "dt": 0.04,
+            "long_time_eddy": 5,
+            "long_time_samples": 10,
+            "blob_eddy": 2,
+            "blob_sigmas": [1.0, 2.0],
+            "shear_eddy": 2,
+            "shear_rates": [0.3, 0.7],
+            "shear_samples": 10,
+            "lagrangian_settle_eddy": 1,
+            "lagrangian_sample_eddy": 2,
+            "lagrangian_samples_per_eddy": 2,
+            "lagrangian_tracers": 256,
+        })
+    elif fast:
         cfg.update({
             "nx": 64,
             "dt": 0.02,
@@ -651,6 +667,7 @@ def _apply_speed_profile(cfg, fast, full):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--smoke", action="store_true", help="Ultra-fast smoke test (~2-3 min)")
     parser.add_argument("--fast", action="store_true", help="Use a lightweight config")
     parser.add_argument("--full", action="store_true", help="Use a heavier config")
     parser.add_argument("--backend", choices=["cpu", "mlx"], default="cpu")
@@ -658,8 +675,8 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None)
     args = parser.parse_args()
 
-    if args.fast and args.full:
-        raise SystemExit("Choose only one of --fast or --full.")
+    if sum([args.smoke, args.fast, args.full]) > 1:
+        raise SystemExit("Choose only one of --smoke, --fast, or --full.")
 
     cfg = {
         "nx": 128,
@@ -689,7 +706,7 @@ def main():
         "lagrangian_samples_per_eddy": 5,
         "lagrangian_tracers": 8192,
     }
-    _apply_speed_profile(cfg, args.fast, args.full)
+    _apply_speed_profile(cfg, args.smoke, args.fast, args.full)
 
     results = {
         "config": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in cfg.items()},
