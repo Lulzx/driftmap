@@ -5,13 +5,12 @@ import pytest
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from vpfm.simulation import Simulation, lamb_oseen, vortex_pair, kelvin_helmholtz, random_turbulence
-from vpfm.diagnostics import find_vortex_centroid, find_vortex_peak
-from vpfm.flow_map import DualScaleFlowMapIntegrator, DualScaleFlowMapState, _compose_jacobians
-from vpfm.grid import Grid
-from vpfm.particles import ParticleSystem
+from vpfm import Simulation, lamb_oseen, vortex_pair, kelvin_helmholtz, random_turbulence
+from vpfm.diagnostics.diagnostics import find_vortex_centroid, find_vortex_peak
+from vpfm.core.flow_map import DualScaleFlowMapIntegrator, DualScaleFlowMapState, _compose_jacobians
+from vpfm import Grid, ParticleSystem
 from baseline.finite_diff import FiniteDifferenceSimulation
 
 
@@ -276,8 +275,8 @@ class TestDualScaleFlowMap:
         grid.q = lamb_oseen(X, Y, Lx/2, Ly/2, Gamma=2*np.pi, r0=0.5)
 
         # Solve for velocity
-        from vpfm.poisson import solve_poisson_hm
-        from vpfm.velocity import compute_velocity, compute_velocity_gradient
+        from vpfm.numerics.poisson import solve_poisson_hm
+        from vpfm.numerics.velocity import compute_velocity, compute_velocity_gradient
         grid.phi = solve_poisson_hm(grid.q, Lx, Ly)
         compute_velocity(grid)
         compute_velocity_gradient(grid)
@@ -378,7 +377,7 @@ class TestHasegawaWakatani:
 
     def test_hw_simulation_runs(self):
         """Test that HW simulation runs without errors."""
-        from vpfm.hasegawa_wakatani import HWSimulation, hw_random_perturbation
+        from vpfm.physics.hasegawa_wakatani import HWSimulation, hw_random_perturbation
 
         nx, ny = 32, 32
         Lx, Ly = 20 * np.pi, 20 * np.pi
@@ -414,7 +413,7 @@ class TestHasegawaWakatani:
         Zonal flows (k_y = 0 modes) should be spontaneously generated
         from drift-wave turbulence due to Reynolds stress.
         """
-        from vpfm.hasegawa_wakatani import HWSimulation, hw_random_perturbation
+        from vpfm.physics.hasegawa_wakatani import HWSimulation, hw_random_perturbation
         from numpy.fft import fft2
 
         nx, ny = 32, 32
@@ -476,7 +475,7 @@ class TestHasegawaWakatani:
         Note: This is a qualitative test checking that flux is non-zero
         for finite adiabaticity. Full scaling tests require longer runs.
         """
-        from vpfm.hasegawa_wakatani import HWSimulation, hw_random_perturbation
+        from vpfm.physics.hasegawa_wakatani import HWSimulation, hw_random_perturbation
 
         nx, ny = 32, 32
         Lx, Ly = 20 * np.pi, 20 * np.pi
@@ -518,7 +517,7 @@ class TestHasegawaWakatani:
 
     def test_hw_energy_enstrophy_tracking(self):
         """Test that HW diagnostics track energy and enstrophy correctly."""
-        from vpfm.hasegawa_wakatani import HWSimulation, hw_random_perturbation
+        from vpfm.physics.hasegawa_wakatani import HWSimulation, hw_random_perturbation
 
         nx, ny = 32, 32
         Lx, Ly = 20 * np.pi, 20 * np.pi

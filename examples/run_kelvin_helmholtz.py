@@ -13,8 +13,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from vpfm import Simulation, kelvin_helmholtz
 
@@ -96,10 +97,14 @@ def main():
         ax.set_ylabel('y')
         plt.colorbar(im, ax=ax, label='Vorticity')
 
+    output_dir = Path(__file__).resolve().parents[1] / "assets" / "images"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     plt.suptitle('Kelvin-Helmholtz Instability (VPFM)', fontsize=14)
     plt.tight_layout()
-    plt.savefig('kelvin_helmholtz.png', dpi=150)
-    print("\nPlot saved to kelvin_helmholtz.png")
+    out_path = output_dir / "kelvin_helmholtz.png"
+    plt.savefig(out_path, dpi=150)
+    print(f"\nPlot saved to {out_path}")
 
     # Plot energy evolution
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -112,8 +117,9 @@ def main():
     ax.axhline(1.0, color='k', linestyle='--', alpha=0.5)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig('kelvin_helmholtz_energy.png', dpi=150)
-    print("Energy plot saved to kelvin_helmholtz_energy.png")
+    energy_path = output_dir / "kelvin_helmholtz_energy.png"
+    plt.savefig(energy_path, dpi=150)
+    print(f"Energy plot saved to {energy_path}")
 
     plt.show()
 

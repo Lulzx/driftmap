@@ -15,11 +15,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from vpfm.hasegawa_wakatani import HWSimulation, hw_random_perturbation
-from vpfm.flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
+from vpfm import Simulation
+from vpfm.physics.hasegawa_wakatani import hw_random_perturbation
+from vpfm.diagnostics.flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
 from scipy.interpolate import RegularGridInterpolator
 
 
@@ -50,7 +52,7 @@ def run_hw_turbulence(nx=128, n_steps=5000, dt=0.02):
     print()
 
     # Initialize simulation
-    sim = HWSimulation(
+    sim = Simulation(
         nx=nx, ny=ny, Lx=Lx, Ly=Ly, dt=dt,
         alpha=alpha, kappa=kappa, mu=mu, D=D, nu_sheath=nu_sheath,
     )
@@ -67,7 +69,7 @@ def run_hw_turbulence(nx=128, n_steps=5000, dt=0.02):
         points = np.column_stack([px % Lx, py % Ly])
         return interp(points)
 
-    sim.set_initial_condition(ic_func)
+    sim.set_initial_condition_hw(ic_func)
 
     # Set up virtual probe at mid-domain
     probe = VirtualProbe(x_pos=Lx/2, y_range=(0, Ly), sample_rate=10)
@@ -83,7 +85,16 @@ def run_hw_turbulence(nx=128, n_steps=5000, dt=0.02):
     print("-" * 60)
 
     for step in range(n_steps):
-        sim.advance()
+        sim.step_hw()
+
+        needs_refresh = (
+            step % probe.sample_rate == 0
+            or step % 100 == 0
+            or step % snapshot_interval == 0
+            or step == n_steps - 1
+        )
+        if needs_refresh:
+            sim._refresh_grid_fields_hw()
 
         # Probe measurement
         if step % probe.sample_rate == 0:
@@ -92,7 +103,15 @@ def run_hw_turbulence(nx=128, n_steps=5000, dt=0.02):
 
         # Diagnostics
         if step % 100 == 0 or step == n_steps - 1:
-            diag = sim.compute_diagnostics()
+            diag = sim.compute_hw_diagnostics()
+            sim.history['time'].append(sim.time)
+            sim.history['energy'].append(diag['energy'])
+            sim.history['enstrophy'].append(diag['enstrophy'])
+            sim.history['density_variance'].append(diag['density_variance'])
+            sim.history['particle_flux'].append(diag['particle_flux'])
+            sim.history['zonal_energy'].append(diag['zonal_energy'])
+            sim.history['max_q'].append(diag['max_vorticity'])
+            sim.history['max_jacobian_dev'].append(sim.integrator.estimate_error(sim.flow_map))
             print(f"Step {step:5d}, t={sim.time:6.1f}, "
                   f"E={diag['energy']:.3e}, "
                   f"Γ={diag['particle_flux']:+.2e}, "
@@ -218,8 +237,11 @@ def run_hw_turbulence(nx=128, n_steps=5000, dt=0.02):
         axes[2, 2].grid(True)
 
     plt.tight_layout()
-    plt.savefig('hasegawa_wakatani_turbulence.png', dpi=150)
-    print(f"Plot saved to hasegawa_wakatani_turbulence.png")
+    output_dir = Path(__file__).resolve().parents[1] / "assets" / "images"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "hasegawa_wakatani_turbulence.png"
+    plt.savefig(out_path, dpi=150)
+    print(f"Plot saved to {out_path}")
     plt.show()
 
 

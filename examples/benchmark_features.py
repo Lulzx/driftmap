@@ -16,15 +16,25 @@ import matplotlib.pyplot as plt
 import time
 import sys
 import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-from vpfm import Simulation, lamb_oseen, kelvin_helmholtz, random_turbulence
-from vpfm.flow_map import DualScaleFlowMapIntegrator, FlowMapIntegrator
-from vpfm.grid import Grid
-from vpfm.particles import ParticleSystem
-from vpfm.poisson import solve_poisson_hm
-from vpfm.velocity import compute_velocity, compute_velocity_gradient
+from vpfm import (
+    Simulation,
+    lamb_oseen,
+    kelvin_helmholtz,
+    random_turbulence,
+    DualScaleFlowMapIntegrator,
+    FlowMapIntegrator,
+    Grid,
+    ParticleSystem,
+    solve_poisson_hm,
+    compute_velocity,
+    compute_velocity_gradient,
+)
 from baseline.finite_diff import FiniteDifferenceSimulation
 
 
@@ -330,17 +340,19 @@ def benchmark_hw_physics():
     print("Benchmark 5: Hasegawa-Wakatani Turbulence")
     print("=" * 60)
 
-    from vpfm.hasegawa_wakatani import HWSimulation, hw_random_perturbation
+    from vpfm.physics.hasegawa_wakatani import hw_random_perturbation
 
     nx, ny = 64, 64
     Lx, Ly = 20 * np.pi, 20 * np.pi
     n_steps = 200
 
     print("\nRunning HW simulation (α=0.5, κ=0.1)...")
-    sim = HWSimulation(
-        nx=nx, ny=ny, Lx=Lx, Ly=Ly, dt=0.05,
+    sim = Simulation(
+        nx=nx, ny=ny, Lx=Lx, Ly=Ly, dt=0.02,
         alpha=0.5, kappa=0.1, mu=1e-3, D=1e-3,
-        particles_per_cell=1
+        particles_per_cell=1,
+        track_hessian=False,
+        use_gradient_p2g=False,
     )
 
     perturbation = hw_random_perturbation(nx, ny, Lx, Ly, k_peak=5.0, amplitude=0.1, seed=42)
@@ -351,13 +363,13 @@ def benchmark_hw_physics():
         y_grid = np.linspace(sim.grid.dy/2, Ly - sim.grid.dy/2, ny)
         interp = RegularGridInterpolator((x_grid, y_grid), perturbation,
                                          bounds_error=False, fill_value=0)
-        points = np.column_stack([x, y])
+        points = np.column_stack([x % Lx, y % Ly])
         return interp(points)
 
-    sim.set_initial_condition(ic)
+    sim.set_initial_condition_hw(ic)
 
     t0 = time.perf_counter()
-    sim.run(n_steps, diag_interval=20, verbose=False)
+    sim.run_hw(n_steps, diag_interval=20, verbose=False)
     hw_time = time.perf_counter() - t0
 
     results = {
@@ -461,9 +473,13 @@ def generate_plots(results):
     ax6.set_title('HW: Particle Flux')
     ax6.grid(True, alpha=0.3)
 
+    output_dir = Path(__file__).resolve().parents[1] / "assets" / "images"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     plt.tight_layout()
-    plt.savefig('benchmark_results.png', dpi=150, bbox_inches='tight')
-    print("Saved: benchmark_results.png")
+    results_path = output_dir / "benchmark_results.png"
+    plt.savefig(results_path, dpi=150, bbox_inches='tight')
+    print(f"Saved: {results_path}")
 
     # Generate summary bar chart
     fig2, axes = plt.subplots(1, 3, figsize=(14, 4))
@@ -514,8 +530,9 @@ def generate_plots(results):
                 f'{val:.1f}%', ha='center', va='bottom', fontweight='bold')
 
     plt.tight_layout()
-    plt.savefig('benchmark_summary.png', dpi=150, bbox_inches='tight')
-    print("Saved: benchmark_summary.png")
+    summary_path = output_dir / "benchmark_summary.png"
+    plt.savefig(summary_path, dpi=150, bbox_inches='tight')
+    print(f"Saved: {summary_path}")
 
     plt.close('all')
 

@@ -21,10 +21,9 @@ import time
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from vpfm import check_mlx_available, set_backend
-from vpfm.kernels import P2G_bspline, G2P_bspline, InterpolationKernel
+from vpfm import check_mlx_available, P2G_bspline, G2P_bspline, InterpolationKernel
 
 
 def benchmark_p2g_cpu(n_particles: int, nx: int, n_runs: int = 20):
@@ -59,7 +58,7 @@ def benchmark_p2g_mlx(n_particles: int, nx: int, n_runs: int = 20):
         return None
 
     import mlx.core as mx
-    from vpfm.kernels_mlx import P2G_mlx
+    from vpfm import P2G_mlx
 
     np.random.seed(42)
     Lx = Ly = 2 * np.pi
@@ -117,7 +116,7 @@ def benchmark_g2p_mlx(n_particles: int, nx: int, n_runs: int = 20):
         return None
 
     import mlx.core as mx
-    from vpfm.kernels_mlx import G2P_mlx
+    from vpfm import G2P_mlx
 
     np.random.seed(42)
     Lx = Ly = 2 * np.pi
@@ -145,7 +144,7 @@ def benchmark_g2p_mlx(n_particles: int, nx: int, n_runs: int = 20):
 
 def benchmark_jacobian_cpu(n_particles: int, n_runs: int = 100):
     """Benchmark CPU Jacobian RHS."""
-    from vpfm.flow_map import _jacobian_rhs_parallel
+    from vpfm.core.flow_map import _jacobian_rhs_parallel
 
     np.random.seed(42)
     J = np.random.randn(n_particles, 2, 2).astype(np.float64)
@@ -172,7 +171,7 @@ def benchmark_jacobian_mlx(n_particles: int, n_runs: int = 100):
         return None
 
     import mlx.core as mx
-    from vpfm.kernels_mlx import jacobian_rhs_mlx
+    from vpfm import jacobian_rhs_mlx
 
     np.random.seed(42)
     J_np = np.random.randn(n_particles, 2, 2).astype(np.float32)

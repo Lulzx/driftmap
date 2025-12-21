@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Test Hasegawa-Wakatani turbulence with VPFM SimulationV2.
+"""Test Hasegawa-Wakatani turbulence with the unified VPFM simulation.
 
-This script verifies whether the perfectly preserved vortex blobs
-(100% peak preservation from VPFM) can actually drive turbulence
+This script checks whether preserved vortex blobs can drive turbulence
 through the HW resistive coupling mechanism.
 
 Key physics test:
-- VPFM conserves particle vorticity exactly: Dω/Dt = 0
+- VPFM preserves particle vorticity under advection: Dω/Dt = 0
 - HW source term α(φ - n) generates new vorticity when φ ≠ n
 - If blobs are "real" (not just artifacts), they should:
   1. Cause φ-n decoupling through differential advection
@@ -24,10 +23,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from vpfm.simulation import Simulation, lamb_oseen
+from vpfm import Simulation, lamb_oseen
 
 
 def create_blob_perturbation(Lx: float, Ly: float, n_blobs: int = 5,
@@ -82,7 +82,7 @@ def create_blob_perturbation(Lx: float, Ly: float, n_blobs: int = 5,
 
 
 def run_hw_v2_test(nx: int = 64, n_steps: int = 2000, dt: float = 0.02):
-    """Run HW turbulence test with SimulationV2.
+    """Run HW turbulence test with the unified simulation.
 
     Args:
         nx: Grid resolution
@@ -99,7 +99,7 @@ def run_hw_v2_test(nx: int = 64, n_steps: int = 2000, dt: float = 0.02):
     D = 1e-4          # Density diffusion
 
     print("=" * 70)
-    print("Hasegawa-Wakatani Turbulence Test with SimulationV2 (VPFM)")
+    print("Hasegawa-Wakatani Turbulence Test (VPFM)")
     print("=" * 70)
     print()
     print("Key question: Can perfectly preserved VPFM blobs drive turbulence?")
@@ -152,9 +152,21 @@ def run_hw_v2_test(nx: int = 64, n_steps: int = 2000, dt: float = 0.02):
     for step in range(n_steps):
         sim.step_hw()
 
+        needs_refresh = (step % 100 == 0) or (step == n_steps - 1) or (step in snapshot_times)
+        if needs_refresh:
+            sim._refresh_grid_fields_hw()
+
         # Periodic diagnostics
         if step % 100 == 0 or step == n_steps - 1:
             diag = sim.compute_hw_diagnostics()
+            sim.history['time'].append(sim.time)
+            sim.history['energy'].append(diag['energy'])
+            sim.history['enstrophy'].append(diag['enstrophy'])
+            sim.history['density_variance'].append(diag['density_variance'])
+            sim.history['particle_flux'].append(diag['particle_flux'])
+            sim.history['zonal_energy'].append(diag['zonal_energy'])
+            sim.history['max_q'].append(diag['max_vorticity'])
+            sim.history['max_jacobian_dev'].append(sim.integrator.estimate_error(sim.flow_map))
             print(f"Step {step:5d}, t={sim.time:6.2f}: "
                   f"Γ={diag['particle_flux']:+.2e}, "
                   f"|φ-n|={diag['coupling_strength']:.4f}, "
@@ -292,8 +304,11 @@ def run_hw_v2_test(nx: int = 64, n_steps: int = 2000, dt: float = 0.02):
     axes[2, 3].grid(True)
 
     plt.tight_layout()
-    plt.savefig('hw_v2_turbulence_test.png', dpi=150)
-    print(f"Plot saved to hw_v2_turbulence_test.png")
+    output_dir = Path(__file__).resolve().parents[1] / "assets" / "images"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "hw_v2_turbulence_test.png"
+    plt.savefig(out_path, dpi=150)
+    print(f"Plot saved to {out_path}")
     plt.show()
 
 

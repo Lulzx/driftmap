@@ -14,11 +14,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-from vpfm.simulation import Simulation, lamb_oseen
-from vpfm.diagnostics import find_vortex_centroid, find_vortex_peak
+from vpfm import Simulation, lamb_oseen
+from vpfm.diagnostics.diagnostics import find_vortex_centroid, find_vortex_peak
 from baseline.finite_diff import FiniteDifferenceSimulation
 
 
@@ -175,8 +178,11 @@ def run_comparison(nx=128, n_steps=1000, dt=0.01):
     axes[1, 2].grid(True)
 
     plt.tight_layout()
-    plt.savefig('lamb_oseen_comparison.png', dpi=150)
-    print(f"\nPlot saved to lamb_oseen_comparison.png")
+    output_dir = Path(__file__).resolve().parents[1] / "assets" / "images"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "lamb_oseen_comparison.png"
+    plt.savefig(out_path, dpi=150)
+    print(f"\nPlot saved to {out_path}")
     plt.show()
 
 

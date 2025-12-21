@@ -5,13 +5,13 @@ import pytest
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from vpfm.grid import Grid
-from vpfm.particles import ParticleSystem
-from vpfm.transfers import P2G_vectorized, G2P
-from vpfm.poisson import solve_poisson_hm, solve_poisson_standard
-from vpfm.velocity import compute_velocity, compute_velocity_gradient
+from vpfm import Grid, ParticleSystem
+from vpfm.core.transfers import P2G_vectorized, G2P
+from vpfm.core.flow_map import _estimate_jacobian_error
+from vpfm.numerics.poisson import solve_poisson_hm, solve_poisson_standard
+from vpfm.numerics.velocity import compute_velocity, compute_velocity_gradient
 
 
 class TestGrid:
@@ -77,6 +77,16 @@ class TestParticles:
         assert np.all(ps.x < grid.Lx)
         assert np.all(ps.y >= 0)
         assert np.all(ps.y < grid.Ly)
+
+    def test_jacobian_error_estimate(self):
+        """Jacobian error should be non-zero for perturbed matrices."""
+        J = np.zeros((2, 2, 2))
+        J[:, 0, 0] = 1.0
+        J[:, 1, 1] = 1.0
+        J[0, 0, 0] = 1.2  # Perturb one particle
+
+        err = _estimate_jacobian_error(J)
+        assert err > 0.1
 
 
 class TestTransfers:
