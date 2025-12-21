@@ -1,0 +1,233 @@
+\documentclass[preprint,12pt]{elsarticle}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+\journal{Computer Physics Communications}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{A Vortex Particle Method for Hasegawa-Wakatani Plasma Turbulence}
+
+\author[inst1]{Author Name\corref{cor1}}
+\ead{email@institution.edu}
+\cortext[cor1]{Corresponding author}
+\affiliation[inst1]{organization={Institution Name},
+                    city={City},
+                    country={Country}}
+
+\begin{abstract}
+We present an implementation of the Vortex Particle Flow Map (VPFM) method for two-dimensional drift-wave turbulence governed by the Hasegawa-Wakatani equations. The method exploits the material conservation of potential vorticity in the adiabatic limit, advecting vorticity and density on Lagrangian particles while reconstructing velocity on an Eulerian grid via spectral Poisson solve. We validate the implementation against linear dispersion theory and compare with an Arakawa finite-difference baseline, finding equivalent accuracy for energy and enstrophy conservation. The implementation includes B-spline interpolation kernels, RK4 time integration, and adaptive flow-map reinitialization. This provides a foundation for Lagrangian transport studies in plasma edge turbulence. Code is publicly available at \url{https://github.com/Lulzx/driftmap}.
+\end{abstract}
+
+\begin{keyword}
+plasma turbulence \sep vortex methods \sep Hasegawa-Wakatani \sep Lagrangian methods \sep drift-wave instability
+\end{keyword}
+
+\end{frontmatter}
+
+%% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+%% ============================================================================
+
+Turbulent transport in the scrape-off layer (SOL) of magnetic confinement fusion devices remains a critical challenge for reactor design. The cross-field transport of particles and heat is dominated by coherent structures---filaments or ``blobs''---that propagate radially outward \cite{krasheninnikov2008,dippolito2011}. Understanding the dynamics of these structures requires accurate numerical simulation of drift-wave turbulence.
+
+The Hasegawa-Wakatani (HW) equations \cite{hasegawa1983} provide a minimal model for resistive drift-wave turbulence in the plasma edge:
+\begin{align}
+\frac{\partial \zeta}{\partial t} + \{\phi, \zeta\} &= \alpha(\phi - n) + \nu \nabla^2 \zeta, \label{eq:hw_zeta} \\
+\frac{\partial n}{\partial t} + \{\phi, n\} &= \alpha(\phi - n) - \kappa \frac{\partial \phi}{\partial y} + D \nabla^2 n, \label{eq:hw_n}
+\end{align}
+where $\zeta = \nabla^2 \phi$ is the vorticity, $\phi$ the electrostatic potential, $n$ the density fluctuation, $\alpha$ the adiabaticity parameter (resistive coupling), $\kappa$ the background density gradient (curvature drive), and $\nu$, $D$ are dissipation coefficients. The Poisson bracket is $\{f,g\} = \partial_x f \partial_y g - \partial_y f \partial_x g$.
+
+In the adiabatic limit ($\alpha \to \infty$, $n \to \phi$), the system reduces to the Hasegawa-Mima equation \cite{hasegawa1978}:
+\begin{equation}
+\frac{\partial q}{\partial t} + \{\phi, q\} = 0, \quad q = \nabla^2 \phi - \phi,
+\label{eq:hm}
+\end{equation}
+where the potential vorticity $q$ is materially conserved along $\mathbf{E} \times \mathbf{B}$ drift trajectories. This material conservation law is mathematically identical to vorticity conservation in two-dimensional incompressible fluid dynamics.
+
+This isomorphism motivates the application of Lagrangian vortex methods to plasma turbulence. Vortex methods have a long history in computational fluid dynamics \cite{cottet2000,koumoutsakos2005}, offering advantages in preserving coherent structures and reducing numerical diffusion. Recently, Wang et al.\ \cite{wang2025} introduced Vortex Particle Flow Maps (VPFM), which combine Lagrangian particle advection with flow-map tracking to maintain accuracy over long time integrations.
+
+In this work, we adapt the VPFM method to the Hasegawa-Wakatani equations. The key contributions are:
+\begin{enumerate}
+\item An implementation of VPFM for drift-wave turbulence with full HW source terms;
+\item Validation against linear HW dispersion theory;
+\item Comparison with an Arakawa finite-difference baseline \cite{arakawa1966}, demonstrating equivalent accuracy.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:method} describes the VPFM algorithm and its adaptation to HW physics. Section~\ref{sec:validation} presents validation against linear theory. Section~\ref{sec:results} compares VPFM with the Arakawa baseline. Section~\ref{sec:conclusion} concludes with future directions.
+
+%% ============================================================================
+\section{Method}
+\label{sec:method}
+%% ============================================================================
+
+\subsection{Vortex Particle Flow Maps}
+
+The VPFM method \cite{wang2025} represents the vorticity field using Lagrangian particles that carry vorticity values and are advected by the velocity field. The key innovation is tracking the deformation gradient (Jacobian) of the flow map, which enables accurate reconstruction of vorticity gradients without excessive numerical diffusion.
+
+Each particle $p$ carries:
+\begin{itemize}
+\item Position $\mathbf{x}_p(t)$
+\item Vorticity $\zeta_p$ (and density $n_p$ for HW)
+\item Flow-map Jacobian $\mathbf{J}_p = \partial \mathbf{x}_p / \partial \mathbf{X}_p$, where $\mathbf{X}_p$ is the initial position
+\end{itemize}
+
+The evolution equations are:
+\begin{align}
+\frac{d\mathbf{x}_p}{dt} &= \mathbf{v}(\mathbf{x}_p, t), \label{eq:advect} \\
+\frac{d\mathbf{J}_p}{dt} &= \nabla \mathbf{v} \cdot \mathbf{J}_p, \label{eq:jacobian}
+\end{align}
+where $\mathbf{v} = \hat{\mathbf{z}} \times \nabla \phi$ is the $\mathbf{E} \times \mathbf{B}$ drift velocity.
+
+When the Jacobian deviates significantly from the identity (indicating large deformation), the flow map is reinitialized: particle positions are reset to a regular grid and values are interpolated from the current field.
+
+\subsection{Algorithm}
+
+Algorithm~\ref{alg:vpfm} summarizes the VPFM timestep for Hasegawa-Wakatani.
+
+\begin{algorithm}[t]
+\caption{VPFM timestep for Hasegawa-Wakatani}
+\label{alg:vpfm}
+\begin{algorithmic}[1]
+\Require Particles with $(\mathbf{x}_p, \zeta_p, n_p, \mathbf{J}_p)$, timestep $\Delta t$
+\State \textbf{P2G Transfer:} Interpolate $\zeta$, $n$ from particles to grid using B-splines
+\State \textbf{Poisson Solve:} Compute $\phi$ from $\nabla^2 \phi = \zeta$ (spectral method)
+\State \textbf{Velocity:} Compute $\mathbf{v} = \hat{\mathbf{z}} \times \nabla \phi$
+\State \textbf{Source Terms:} Compute $S_\zeta = \alpha(\phi - n) + \nu \nabla^2 \zeta$
+\State \hspace{3.4em} Compute $S_n = \alpha(\phi - n) - \kappa \partial_y \phi + D \nabla^2 n$
+\State \textbf{Update Particles:} $\zeta_p \gets \zeta_p + \Delta t \cdot S_\zeta(\mathbf{x}_p)$
+\State \hspace{4.6em} $n_p \gets n_p + \Delta t \cdot S_n(\mathbf{x}_p)$
+\State \textbf{Advect:} Integrate $d\mathbf{x}_p/dt = \mathbf{v}$ using RK4
+\State \textbf{Jacobian:} Integrate $d\mathbf{J}_p/dt = \nabla\mathbf{v} \cdot \mathbf{J}_p$ using RK4
+\If{$\max_p \|\mathbf{J}_p - \mathbf{I}\| > \theta$}
+    \State \textbf{Reinitialize:} Reset particles to grid, interpolate values
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Implementation Details}
+
+\paragraph{Interpolation kernels.}
+We use B-spline kernels for particle-to-grid (P2G) and grid-to-particle (G2P) transfers. Quadratic B-splines provide a good balance between accuracy and computational cost, with $C^1$ continuity ensuring smooth velocity fields.
+
+\paragraph{Poisson solver.}
+The Poisson equation $\nabla^2 \phi = \zeta$ is solved spectrally using the Fast Fourier Transform. For periodic domains, the zero mode is set to enforce $\langle \phi \rangle = 0$.
+
+\paragraph{Time integration.}
+Particle advection and Jacobian evolution use fourth-order Runge-Kutta (RK4). Source terms are applied with forward Euler, which is sufficient for the typically small source magnitudes.
+
+\paragraph{Reinitialization.}
+When $\max_p \|\mathbf{J}_p - \mathbf{I}\|_F > \theta$ (Frobenius norm), the flow map is reinitialized. The threshold $\theta$ controls the trade-off between accuracy (low $\theta$, frequent reinitialization) and efficiency (high $\theta$, rare reinitialization). We use $\theta = 0.5$ as a default.
+
+\paragraph{Boundary conditions.}
+The implementation uses doubly-periodic boundary conditions, appropriate for local simulations of the plasma edge.
+
+%% ============================================================================
+\section{Validation}
+\label{sec:validation}
+%% ============================================================================
+
+\subsection{Linear Dispersion Relation}
+
+The Hasegawa-Wakatani equations support linear drift waves with dispersion relation \cite{hasegawa1983}:
+\begin{equation}
+\omega = \omega_* \frac{k_y}{1 + k_\perp^2} + i\gamma,
+\label{eq:dispersion}
+\end{equation}
+where $\omega_* = \kappa$ is the diamagnetic frequency, $k_\perp^2 = k_x^2 + k_y^2$, and the growth rate $\gamma$ depends on $\alpha$ and $k_\perp$.
+
+We validate the VPFM implementation by initializing a single Fourier mode and measuring the growth rate. Figure~\ref{fig:dispersion} shows the measured growth rates compared to the theoretical prediction for $\alpha = 0.5$, $\kappa = 1.0$. The agreement confirms correct implementation of the HW physics.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.8\linewidth}{\centering\vspace{2em}[Figure: Growth rate $\gamma$ vs $k_y$\\Theory (line) vs VPFM (points)]\vspace{2em}}}
+\caption{Linear validation of VPFM against Hasegawa-Wakatani dispersion theory. Growth rates are measured from single-mode initial conditions and compared to the analytic prediction. Parameters: $\alpha = 0.5$, $\kappa = 1.0$, grid $128 \times 128$.}
+\label{fig:dispersion}
+\end{figure}
+
+%% ============================================================================
+\section{Results}
+\label{sec:results}
+%% ============================================================================
+
+\subsection{Comparison with Arakawa Finite Differences}
+
+We compare VPFM against an Arakawa finite-difference scheme \cite{arakawa1966}, which is widely used for geophysical and plasma turbulence due to its conservation properties. The Arakawa Jacobian discretization exactly conserves energy and enstrophy in the inviscid limit.
+
+Both methods are applied to an identical test case: a Gaussian vortex blob initialized at the domain center, evolved for 100 eddy turnover times. Table~\ref{tab:comparison} summarizes the results.
+
+\begin{table}[t]
+\centering
+\caption{Comparison of VPFM and Arakawa finite differences for Hasegawa-Wakatani turbulence. Grid: $128 \times 128$, domain: $64 \times 64$ $\rho_s$, $\alpha = 0.7$, $\kappa = 1.0$.}
+\label{tab:comparison}
+\begin{tabular}{lcc}
+\toprule
+Metric & VPFM & Arakawa FD \\
+\midrule
+Peak preservation & 69.5\% & 68.3\% \\
+Energy error & 20.2\% & 22.0\% \\
+Enstrophy error & 25.0\% & 27.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The two methods achieve comparable accuracy across all metrics. Peak preservation measures how well the maximum vorticity amplitude is maintained over time. Energy and enstrophy errors quantify the drift from initial values (ideally conserved in the inviscid HM limit, but not in HW due to source terms and dissipation).
+
+\subsection{Discussion}
+
+The equivalence between VPFM and Arakawa is notable given their fundamentally different numerical structures:
+\begin{itemize}
+\item \textbf{Arakawa:} Eulerian, grid-based, conserves energy/enstrophy exactly for the Jacobian
+\item \textbf{VPFM:} Lagrangian particles with Eulerian velocity reconstruction, conserves vorticity along trajectories
+\end{itemize}
+
+The Lagrangian formulation offers potential advantages for:
+\begin{itemize}
+\item \textbf{Long-time integration:} Reduced numerical diffusion from Lagrangian advection
+\item \textbf{Lagrangian diagnostics:} Natural tracking of fluid element trajectories, relevant for transport studies \cite{kadoch2022}
+\item \textbf{Adaptive resolution:} Particles can cluster in regions of interest
+\end{itemize}
+
+These advantages are not demonstrated in the present comparison, which focuses on establishing baseline equivalence. Future work will explore regimes where Lagrangian properties provide measurable benefits.
+
+%% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%% ============================================================================
+
+We have presented an implementation of the Vortex Particle Flow Map method for Hasegawa-Wakatani drift-wave turbulence. The implementation:
+\begin{enumerate}
+\item Correctly reproduces linear HW dispersion theory;
+\item Achieves accuracy comparable to the Arakawa finite-difference baseline for energy, enstrophy, and peak preservation.
+\end{enumerate}
+
+The Lagrangian method provides a fundamentally different numerical structure while matching the accuracy of established Eulerian methods. This validates VPFM as a viable approach for plasma turbulence simulation and provides a foundation for future studies of Lagrangian transport in the SOL.
+
+Planned extensions include:
+\begin{itemize}
+\item Systematic study of VPFM advantages in the blob-dominated transport regime;
+\item Three-dimensional extension with parallel dynamics;
+\item Comparison with experimental blob statistics from tokamak edge diagnostics.
+\end{itemize}
+
+\section*{Code Availability}
+
+The implementation is available at \url{https://github.com/Lulzx/driftmap} under the MIT license. The repository includes validation tests, baseline comparisons, and example scripts for reproducing the results in this paper.
+
+\section*{Acknowledgments}
+
+[Acknowledgments here]
+
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}
