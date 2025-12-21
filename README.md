@@ -7,17 +7,12 @@ The Python package name is `vpfm` to keep the VPFM terminology intact.
 
 ## Overview
 
-This project demonstrates the VPFM method's advantages for plasma turbulence simulation:
+A Lagrangian vortex method for 2D drift-wave turbulence, adapting VPFM to plasma physics:
 
-- **Structure preservation**: Example benchmark shows ~1.1x peak preservation vs the first-order upwind FD baseline at default reinit settings
 - **Material conservation**: Potential vorticity is materially conserved in HM; HW adds explicit source terms
-- **Low numerical dissipation**: Advection is Lagrangian; reinitialization/transfer is the main diffusion source
-- **Energy/enstrophy drift**: Lower than the upwind FD baseline in included benchmarks
-- **Linear HW validation**: Dispersion test included in `tests/linear_validation/test_dispersion.py`
-- **Kadoch spectral benchmark scaffold**: Scripts + diagnostics in `tests/kadoch_benchmark`
-- **MLX backend (experimental)**: Poisson/velocity + quadratic P2G/G2P + flow-map steps can use MLX in `Simulation`
-- **GPU kernels (experimental)**: Optional MLX/CuPy kernels and FFT microbenchmarks (CuPy not wired into full timestep)
-- **3D extension (experimental)**: 3D VPFM with simple parallel dynamics, not yet validated
+- **Lagrangian advection**: Particles carry vorticity/density; velocity reconstructed on Eulerian grid
+- **Validated physics**: Linear HW dispersion test in `tests/linear_validation/test_dispersion.py`
+- **Arakawa baseline comparison**: Matches Arakawa FD accuracy for energy/enstrophy conservation
 
 ### The Mathematical Isomorphism
 
@@ -60,61 +55,18 @@ Features:
 
 ![Benchmark Summary](assets/images/benchmark_summary.png)
 
-### VPFM vs Finite Difference
+### VPFM vs Arakawa Finite Difference
 
-Benchmarks compare against the included FD baselines (upwind and Arakawa).
-Numbers below are from `examples/benchmark_features.py`; the Arakawa baseline uses a smaller dt and mild viscosity for stability (see script).
+VPFM achieves comparable accuracy to Arakawa finite-differences for Hasegawa-Wakatani turbulence.
+Numbers from `examples/benchmark_features.py`:
 
-| Metric | VPFM | FD Upwind | VPFM Advantage |
-|--------|------|-----------|----------------|
-| Peak preservation | 69.5% | 61.9% | **1.1x** |
-| Energy error | 20.16% | 50.53% | **2.5x** |
-| Enstrophy error | 25.01% | 53.80% | **2.2x** |
+| Metric | VPFM | Arakawa FD |
+|--------|------|------------|
+| Peak preservation | 69.5% | 68.3% |
+| Energy error | 20.2% | 22.0% |
+| Enstrophy error | 25.0% | 27.6% |
 
-### VPFM vs FD Arakawa
-
-| Metric | VPFM | FD Arakawa | VPFM Advantage |
-|--------|------|------------|----------------|
-| Peak preservation | 69.5% | 68.3% | **1.0x** |
-| Energy error | 20.16% | 21.96% | **1.1x** |
-| Enstrophy error | 25.01% | 27.64% | **1.1x** |
-
-### Flow Map Methods
-
-The dual-scale flow map integrator maintains two timescales to target improved gradient accuracy.
-It is wired into `Simulation` via `use_dual_scale=True`:
-
-```python
-sim = Simulation(
-    nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01,
-    use_dual_scale=True,
-    dual_scale_nL=100,
-    dual_scale_nS=20,
-    dual_scale_error_long=3.0,
-    dual_scale_error_short=1.0,
-)
-```
-- **Long map (n_L)**: For vorticity values, reinitialized less frequently
-- **Short map (n_S)**: For gradients, reinitialized more frequently
-
-| Method | Avg Error | Max Error | Reinits |
-|--------|-----------|-----------|---------|
-| Standard | 0.2963 | 0.5381 | 20 |
-| Dual-Scale (experimental) | 1.8065 | 2.8282 | 10S/2L |
-
-Note: Dual-scale flow maps are integrated into `Simulation`, but current benchmark
-settings show higher errors for dual-scale; treat as experimental and tune thresholds.
-
-### P2G Transfer Methods
-
-Gradient-enhanced P2G includes local gradient information; accuracy gains are case-dependent:
-
-| Method | Peak Preservation |
-|--------|-------------------|
-| Standard P2G | 55.7% |
-| Gradient-Enhanced P2G | 47.7% |
-
-Note: Gradient-enhanced P2G is experimental and can be case-dependent.
+The Lagrangian method achieves comparable accuracy while offering a fundamentally different numerical structure, providing a foundation for future extensions where Lagrangian properties may be advantageous (long-time integration, Lagrangian diagnostics, particle tracking).
 
 ### Hasegawa-Wakatani Physics
 
@@ -128,16 +80,12 @@ The HW model includes:
 
 Density is carried on particles and transferred to the grid each step for coupling and diagnostics.
 
-### Scope & Caveats
+### Caveats
 
-- Benchmarks compare against upwind and Arakawa FD baselines; the Arakawa case uses a smaller dt and mild viscosity for stability in `examples/benchmark_features.py`.
-- Dual-scale flow maps are integrated into `Simulation` but remain sensitive to threshold tuning.
-- MLX accelerates Poisson/velocity, quadratic P2G/G2P, and flow-map updates; non-quadratic kernels fall back to CPU, and CuPy remains kernels-only.
-- HW source terms are explicit; high α requires smaller dt or an IMEX scheme (not implemented yet).
-- Kadoch spectral benchmarks are scaffolded but not yet validated against the published slopes.
-- Reinitialization thresholds and particle density strongly affect diffusion; tune for long-time accuracy.
-- Gradient-enhanced P2G is experimental and currently quadratic-kernel only; performance can be case-dependent.
-- The 3D extension is experimental without validation cases.
+- Benchmarks compare against Arakawa FD baseline (uses smaller dt and mild viscosity for stability)
+- HW source terms are explicit; high α requires smaller dt or an IMEX scheme (not yet implemented)
+- Reinitialization thresholds and particle density affect diffusion; tune for long-time accuracy
+- Experimental features (dual-scale flow maps, gradient-enhanced P2G, 3D) are documented at the end of this README
 
 ## Installation
 
@@ -238,7 +186,7 @@ probe.measure(sim.time, sim.n_grid, sim.grid.vx, sim.grid.x, sim.grid.y)
 
 # Get statistics
 stats = probe.compute_statistics()
-print(f"Skewness: {stats.skewness:.2f}")  # Compare with MAST-U data!
+print(f"Skewness: {stats.skewness:.2f}")
 ```
 
 ### Running Examples
@@ -255,12 +203,6 @@ python examples/run_turbulence.py
 
 # Kelvin-Helmholtz instability
 python examples/run_kelvin_helmholtz.py
-
-# Dual-scale flow map demo
-python examples/run_dual_scale.py
-
-# 3D VPFM demo (experimental)
-python examples/run_3d_demo.py
 
 # Full Hasegawa-Wakatani turbulence
 python examples/run_hasegawa_wakatani.py
@@ -330,42 +272,25 @@ python tests/kadoch_benchmark/run_benchmark.py --fast
 python tests/kadoch_benchmark/blob_preservation.py
 ```
 
-## Experimental Validation Targets
-
-Compare simulation results with:
-
-- **MAST-U**: Fast camera blob imaging
-- **ASDEX-Upgrade**: Lithium beam emission
-- **NSTX-U**: Gas puff imaging
-
-Typical experimental values:
-- Flux skewness: 0.5 - 2.0 (positive, bursty outward transport)
-- Flux kurtosis: 1 - 10 (heavy tails)
-- Blob size: 1-5 cm (several ρ_s)
-
 ## Key Features
 
 | Feature | Status |
 |---------|--------|
 | Hasegawa-Mima equation | ✅ |
 | Hasegawa-Wakatani equation | ✅ |
-| Arakawa enstrophy conservation | ✅ (FD baseline `scheme='arakawa'`) |
+| Linear HW dispersion validation | ✅ |
+| Arakawa FD baseline comparison | ✅ |
 | B-spline interpolation kernels | ✅ |
 | RK4 Jacobian evolution | ✅ |
 | Hessian tracking | ✅ |
 | Adaptive reinitialization | ✅ |
-| **Dual-scale flow maps (n_L/n_S)** | ✅ (experimental) |
-| **Gradient-enhanced P2G transfer** | ✅ (experimental; quadratic kernels) |
-| **Adaptive time stepping** | ✅ (CFL-based) |
-| **Kelvin-Helmholtz test case** | ✅ |
 | Sheath damping term (ν_sheath) | ✅ |
 | Virtual probe diagnostics | ✅ |
 | Blob detection | ✅ |
 | Zonal flow analysis | ✅ |
 | Numba JIT acceleration | ✅ |
-| GPU acceleration (MLX, quadratic kernels) | ✅ |
-| CUDA kernels (CuPy) | ✅ (standalone kernels) |
-| 3D extension | ✅ (experimental) |
+
+See [Experimental Features](#experimental-features) for: dual-scale flow maps, gradient-enhanced P2G, 3D extension, GPU backends.
 
 ## Performance
 
@@ -384,58 +309,48 @@ Run the benchmark:
 python examples/benchmark_numba.py
 ```
 
-### GPU Acceleration
+## References
 
-GPU kernels are available for P2G/G2P, Jacobian RHS, and FFT/Poisson microbenchmarks.
-`Simulation(backend='mlx')` now accelerates Poisson/velocity, quadratic P2G/G2P, and
-flow-map updates on Apple Silicon. Non-quadratic kernels fall back to CPU; CuPy
-remains standalone kernels only.
+1. Wang, S., et al. (2025). "Fluid Simulation on Vortex Particle Flow Maps." [arXiv:2505.21946](https://arxiv.org/abs/2505.21946)
+2. Hasegawa, A. & Mima, K. (1978). "Pseudo-three-dimensional turbulence in magnetized nonuniform plasma." Physics of Fluids 21, 87.
+3. Hasegawa, A. & Wakatani, M. (1983). "Plasma edge turbulence." Physical Review Letters 50, 682.
+4. Arakawa, A. (1966). "Computational design for long-term numerical integration of the equations of fluid motion." J. Comp. Phys. 1, 119-143.
+5. Kadoch, B., et al. (2022). "Lagrangian conditional statistics and flow topology in edge plasma turbulence." Physics of Plasmas 29, 102301.
 
-**Apple Silicon (M1/M2/M3):**
-```bash
-pip install mlx
-```
+## Experimental Features
 
-**NVIDIA GPUs:**
-```bash
-pip install cupy-cuda11x  # For CUDA 11.x
-# or
-pip install cupy-cuda12x  # For CUDA 12.x
-```
+These features are included but not yet fully validated. Use with caution and expect to tune parameters.
 
-Usage (availability check):
+### Dual-Scale Flow Maps
+
+Maintains two timescales for potentially improved gradient accuracy. Currently shows higher errors than standard method in benchmarks:
+
 ```python
-from vpfm import check_mlx_available, check_cuda_available
-
-print("MLX available:", check_mlx_available())
-print("CUDA available:", check_cuda_available())
+sim = Simulation(
+    nx=128, ny=128, Lx=2*np.pi, Ly=2*np.pi, dt=0.01,
+    use_dual_scale=True,
+    dual_scale_nL=100,
+    dual_scale_nS=20,
+)
 ```
 
-**MLX Performance (Apple Silicon, microbenchmarks):**
+| Method | Avg Error | Max Error |
+|--------|-----------|-----------|
+| Standard | 0.30 | 0.54 |
+| Dual-Scale | 1.81 | 2.83 |
 
-Sample results from `examples/benchmark_mlx.py` (your numbers will vary):
+### Gradient-Enhanced P2G
 
-| Operation | Grid/Particles | CPU (Numba) | MLX (Metal) | Speedup |
-|-----------|----------------|-------------|-------------|---------|
-| P2G transfer | 16,384 / 128×128 | 0.19 ms | 0.83 ms | 0.2x |
-| G2P transfer | 16,384 / 128×128 | 0.16 ms | 0.43 ms | 0.4x |
-| Jacobian RHS | 16,384 particles | 0.114 ms | 0.561 ms | 0.2x |
-| 2D FFT | 256×256 | 0.384 ms | 0.169 ms | 2.3x |
-| 2D FFT | 512×512 | 1.777 ms | 0.235 ms | 7.6x |
+Includes local gradient information in particle-to-grid transfer. Currently shows lower peak preservation:
 
-MLX helps most for FFT-heavy steps at larger grids (256×256+). For P2G/G2P and Jacobian updates, the CPU
-path is faster at these sizes due to scatter/gather overhead.
+| Method | Peak Preservation |
+|--------|-------------------|
+| Standard P2G | 55.7% |
+| Gradient-Enhanced P2G | 47.7% |
 
-Run MLX benchmark:
-```bash
-python examples/benchmark_mlx.py
-```
+### 3D Extension
 
-### 3D Simulation
-
-The 3D extension is experimental and is not yet validated against standard 3D drift-wave benchmarks.
-
-For 3D turbulence with parallel dynamics:
+3D VPFM with simple parallel dynamics. Not validated against standard 3D drift-wave benchmarks:
 
 ```python
 from vpfm import Simulation3D, gaussian_blob_3d
@@ -447,22 +362,14 @@ sim = Simulation3D(
     dt=0.01,
     cs=1.0,  # Sound speed (parallel dynamics)
 )
-
-def ic(x, y, z):
-    return gaussian_blob_3d(x, y, z, np.pi, np.pi, np.pi,
-                            amplitude=1.0, rx=0.5, ry=0.5, rz=0.5)
-
-sim.set_initial_condition(ic)
-sim.run(n_steps=1000, diag_interval=10)
 ```
 
-## References
+### GPU Backends
 
-1. Wang, S., et al. (2025). "Fluid Simulation on Vortex Particle Flow Maps." [arXiv:2505.21946](https://arxiv.org/abs/2505.21946)
-2. Hasegawa, A. & Mima, K. (1978). "Pseudo-three-dimensional turbulence in magnetized nonuniform plasma." Physics of Fluids 21, 87.
-3. Hasegawa, A. & Wakatani, M. (1983). "Plasma edge turbulence." Physical Review Letters 50, 682.
-4. Arakawa, A. (1966). "Computational design for long-term numerical integration of the equations of fluid motion." J. Comp. Phys. 1, 119-143.
-5. Kadoch, B., et al. (2022). "Lagrangian conditional statistics and flow topology in edge plasma turbulence." Physics of Plasmas 29, 102301.
+- **MLX (Apple Silicon)**: Accelerates Poisson/velocity, quadratic P2G/G2P, flow-map updates. Non-quadratic kernels fall back to CPU.
+- **CuPy (NVIDIA)**: Standalone kernels only, not wired into full timestep.
+
+MLX helps most for FFT-heavy steps at larger grids (256×256+). For P2G/G2P and Jacobian updates, the CPU path is often faster due to scatter/gather overhead.
 
 ## License
 
