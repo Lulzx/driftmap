@@ -16,12 +16,12 @@
 
 \title{A Vortex Particle Method for Hasegawa-Wakatani Plasma Turbulence}
 
-\author[inst1]{Author Name\corref{cor1}}
-\ead{email@institution.edu}
+\author[inst1]{Rishabh Singh\corref{cor1}}
+\ead{wiserishabh@gmail.com}
 \cortext[cor1]{Corresponding author}
-\affiliation[inst1]{organization={Institution Name},
-                    city={City},
-                    country={Country}}
+\affiliation[inst1]{organization={Independent Researcher},
+                    city={},
+                    country={}}
 
 \begin{abstract}
 We present an implementation of the Vortex Particle Flow Map (VPFM) method for two-dimensional drift-wave turbulence governed by the Hasegawa-Wakatani equations. The method exploits the material conservation of potential vorticity in the adiabatic limit, advecting vorticity and density on Lagrangian particles while reconstructing velocity on an Eulerian grid via spectral Poisson solve. We validate the implementation against linear dispersion theory and compare with an Arakawa finite-difference baseline, finding equivalent accuracy for energy and enstrophy conservation. The implementation includes B-spline interpolation kernels, RK4 time integration, and adaptive flow-map reinitialization. This provides a foundation for Lagrangian transport studies in plasma edge turbulence. Code is publicly available at \url{https://github.com/Lulzx/driftmap}.
@@ -149,7 +149,7 @@ We validate the VPFM implementation by initializing a single Fourier mode and me
 
 \begin{figure}[t]
 \centering
-\fbox{\parbox{0.8\linewidth}{\centering\vspace{2em}[Figure: Growth rate $\gamma$ vs $k_y$\\Theory (line) vs VPFM (points)]\vspace{2em}}}
+\includegraphics[width=0.7\linewidth]{figures/fig_dispersion.pdf}
 \caption{Linear validation of VPFM against Hasegawa-Wakatani dispersion theory. Growth rates are measured from single-mode initial conditions and compared to the analytic prediction. Parameters: $\alpha = 0.5$, $\kappa = 1.0$, grid $128 \times 128$.}
 \label{fig:dispersion}
 \end{figure}
@@ -181,6 +181,13 @@ Enstrophy error & 25.0\% & 27.6\% \\
 \end{table}
 
 The two methods achieve comparable accuracy across all metrics. Peak preservation measures how well the maximum vorticity amplitude is maintained over time. Energy and enstrophy errors quantify the drift from initial values (ideally conserved in the inviscid HM limit, but not in HW due to source terms and dissipation).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/fig_comparison.pdf}
+\caption{Comparison of VPFM and Arakawa finite-difference methods. Both methods achieve comparable accuracy for peak preservation and conservation properties over 100 eddy turnover times.}
+\label{fig:comparison}
+\end{figure}
 
 \subsection{Discussion}
 
@@ -225,7 +232,7 @@ The implementation is available at \url{https://github.com/Lulzx/driftmap} under
 
 \section*{Acknowledgments}
 
-[Acknowledgments here]
+The author thanks the developers of the original VPFM method \cite{wang2025} for making their work publicly available. This work builds upon foundational contributions to plasma turbulence modeling by Hasegawa, Wakatani, Mima, and Arakawa.
 
 \bibliographystyle{elsarticle-num}
 \bibliography{references}
