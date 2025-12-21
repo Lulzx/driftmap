@@ -5,13 +5,12 @@
 
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
-\usepackage{hyperref}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
 \usepackage{booktabs}
 \usepackage{xcolor}
-
-%\journal{Computer Physics Communications}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=green!50!black,urlcolor=blue!70!black]{hyperref}
 
 \begin{document}
 
@@ -32,10 +31,8 @@ plasma turbulence \sep vortex methods \sep Hasegawa-Wakatani \sep Lagrangian met
 
 \end{frontmatter}
 
-%% ============================================================================
 \section{Introduction}
 \label{sec:intro}
-%% ============================================================================
 
 Turbulent transport in the scrape-off layer (SOL) of magnetic confinement fusion devices remains a critical challenge for reactor design. The cross-field transport of particles and heat is dominated by coherent structures---filaments or ``blobs''---that propagate radially outward \cite{krasheninnikov2008,dippolito2011}. Understanding the dynamics of these structures requires accurate numerical simulation of drift-wave turbulence.
 
@@ -64,10 +61,8 @@ In this work, we adapt the VPFM method to the Hasegawa-Wakatani equations. The k
 
 The remainder of this paper is organized as follows. Section~\ref{sec:method} describes the VPFM algorithm and its adaptation to HW physics. Section~\ref{sec:validation} presents validation against linear theory. Section~\ref{sec:results} compares VPFM with the Arakawa baseline. Section~\ref{sec:conclusion} concludes with future directions.
 
-%% ============================================================================
 \section{Method}
 \label{sec:method}
-%% ============================================================================
 
 \subsection{Vortex Particle Flow Maps}
 
@@ -96,17 +91,16 @@ Algorithm~\ref{alg:vpfm} summarizes the VPFM timestep for Hasegawa-Wakatani.
 \begin{algorithm}[t]
 \caption{VPFM timestep for Hasegawa-Wakatani}
 \label{alg:vpfm}
+\small
 \begin{algorithmic}[1]
 \Require Particles with $(\mathbf{x}_p, \zeta_p, n_p, \mathbf{J}_p)$, timestep $\Delta t$
-\State \textbf{P2G Transfer:} Interpolate $\zeta$, $n$ from particles to grid using B-splines
-\State \textbf{Poisson Solve:} Compute $\phi$ from $\nabla^2 \phi = \zeta$ (spectral method)
+\State \textbf{P2G Transfer:} Interpolate $\zeta$, $n$ from particles to grid (B-splines)
+\State \textbf{Poisson Solve:} Compute $\phi$ from $\nabla^2 \phi = \zeta$ (spectral)
 \State \textbf{Velocity:} Compute $\mathbf{v} = \hat{\mathbf{z}} \times \nabla \phi$
-\State \textbf{Source Terms:} Compute $S_\zeta = \alpha(\phi - n) + \nu \nabla^2 \zeta$
-\State \hspace{3.4em} Compute $S_n = \alpha(\phi - n) - \kappa \partial_y \phi + D \nabla^2 n$
-\State \textbf{Update Particles:} $\zeta_p \gets \zeta_p + \Delta t \cdot S_\zeta(\mathbf{x}_p)$
-\State \hspace{4.6em} $n_p \gets n_p + \Delta t \cdot S_n(\mathbf{x}_p)$
-\State \textbf{Advect:} Integrate $d\mathbf{x}_p/dt = \mathbf{v}$ using RK4
-\State \textbf{Jacobian:} Integrate $d\mathbf{J}_p/dt = \nabla\mathbf{v} \cdot \mathbf{J}_p$ using RK4
+\State \textbf{Source Terms:} $S_\zeta = \alpha(\phi - n) + \nu \nabla^2 \zeta$, \; $S_n = \alpha(\phi - n) - \kappa \partial_y \phi + D \nabla^2 n$
+\State \textbf{Update Particles:} $\zeta_p \gets \zeta_p + \Delta t \cdot S_\zeta(\mathbf{x}_p)$, \; $n_p \gets n_p + \Delta t \cdot S_n(\mathbf{x}_p)$
+\State \textbf{Advect:} Integrate $d\mathbf{x}_p/dt = \mathbf{v}$ (RK4)
+\State \textbf{Jacobian:} Integrate $d\mathbf{J}_p/dt = \nabla\mathbf{v} \cdot \mathbf{J}_p$ (RK4)
 \If{$\max_p \|\mathbf{J}_p - \mathbf{I}\| > \theta$}
     \State \textbf{Reinitialize:} Reset particles to grid, interpolate values
 \EndIf
@@ -130,10 +124,8 @@ When $\max_p \|\mathbf{J}_p - \mathbf{I}\|_F > \theta$ (Frobenius norm), the flo
 \paragraph{Boundary conditions.}
 The implementation uses doubly-periodic boundary conditions, appropriate for local simulations of the plasma edge.
 
-%% ============================================================================
 \section{Validation}
 \label{sec:validation}
-%% ============================================================================
 
 \subsection{Linear Dispersion Relation}
 
@@ -153,10 +145,8 @@ We validate the VPFM implementation by initializing a single Fourier mode and me
 \label{fig:dispersion}
 \end{figure}
 
-%% ============================================================================
 \section{Results}
 \label{sec:results}
-%% ============================================================================
 
 \subsection{Comparison with Arakawa Finite Differences}
 
@@ -205,10 +195,8 @@ The Lagrangian formulation offers potential advantages for:
 
 These advantages are not demonstrated in the present comparison, which focuses on establishing baseline equivalence. Future work will explore regimes where Lagrangian properties provide measurable benefits.
 
-%% ============================================================================
 \section{Conclusion}
 \label{sec:conclusion}
-%% ============================================================================
 
 We have presented an implementation of the Vortex Particle Flow Map method for Hasegawa-Wakatani drift-wave turbulence. The implementation:
 \begin{enumerate}
