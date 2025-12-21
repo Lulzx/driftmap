@@ -2,18 +2,13 @@
 """Benchmark CPU vs MLX (Apple Silicon GPU) performance.
 
 Compares performance of key VPFM operations:
-- 2D FFT
-- Element-wise operations (HW source terms)
-- Poisson solver
+- P2G transfer (quadratic B-spline)
+- G2P interpolation (quadratic B-spline)
 - Jacobian RHS
-- RK4 position update
+- 2D FFT
 
-Results show MLX provides significant speedup for large grids (256x256+):
-- FFT: up to 13.6x faster
-- Poisson solver: up to 26.9x faster
-- Element-wise ops: up to 23.8x faster
-
-For small problems, CPU (Numba) is faster due to Metal kernel launch overhead.
+Results are hardware-dependent. Expect MLX to help most for large FFTs,
+while scatter/gather-heavy kernels can favor the CPU at small sizes.
 """
 
 import numpy as np
@@ -71,14 +66,14 @@ def benchmark_p2g_mlx(n_particles: int, nx: int, n_runs: int = 20):
 
     # Warmup
     for _ in range(3):
-        _ = P2G_mlx(px, py, pq, nx, nx, dx, dy)
-        mx.eval()
+        out = P2G_mlx(px, py, pq, nx, nx, dx, dy)
+        mx.eval(out)
 
     # Benchmark
     t0 = time.perf_counter()
     for _ in range(n_runs):
-        _ = P2G_mlx(px, py, pq, nx, nx, dx, dy)
-        mx.eval()
+        out = P2G_mlx(px, py, pq, nx, nx, dx, dy)
+        mx.eval(out)
     elapsed = time.perf_counter() - t0
 
     return elapsed / n_runs * 1000  # ms
@@ -129,14 +124,14 @@ def benchmark_g2p_mlx(n_particles: int, nx: int, n_runs: int = 20):
 
     # Warmup
     for _ in range(3):
-        _ = G2P_mlx(grid_field, px, py, dx, dy)
-        mx.eval()
+        out = G2P_mlx(grid_field, px, py, dx, dy)
+        mx.eval(out)
 
     # Benchmark
     t0 = time.perf_counter()
     for _ in range(n_runs):
-        _ = G2P_mlx(grid_field, px, py, dx, dy)
-        mx.eval()
+        out = G2P_mlx(grid_field, px, py, dx, dy)
+        mx.eval(out)
     elapsed = time.perf_counter() - t0
 
     return elapsed / n_runs * 1000  # ms
@@ -184,14 +179,14 @@ def benchmark_jacobian_mlx(n_particles: int, n_runs: int = 100):
 
     # Warmup
     for _ in range(5):
-        _ = jacobian_rhs_mlx(J, grad_v)
-        mx.eval()
+        out = jacobian_rhs_mlx(J, grad_v)
+        mx.eval(out)
 
     # Benchmark
     t0 = time.perf_counter()
     for _ in range(n_runs):
-        _ = jacobian_rhs_mlx(J, grad_v)
-        mx.eval()
+        out = jacobian_rhs_mlx(J, grad_v)
+        mx.eval(out)
     elapsed = time.perf_counter() - t0
 
     return elapsed / n_runs * 1000  # ms
@@ -227,14 +222,14 @@ def benchmark_fft_mlx(nx: int, n_runs: int = 50):
 
     # Warmup
     for _ in range(5):
-        _ = mx.fft.fft2(field)
-        mx.eval()
+        out = mx.fft.fft2(field)
+        mx.eval(out)
 
     # Benchmark
     t0 = time.perf_counter()
     for _ in range(n_runs):
-        _ = mx.fft.fft2(field)
-        mx.eval()
+        out = mx.fft.fft2(field)
+        mx.eval(out)
     elapsed = time.perf_counter() - t0
 
     return elapsed / n_runs * 1000  # ms

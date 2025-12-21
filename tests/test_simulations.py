@@ -7,7 +7,14 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from vpfm import Simulation, lamb_oseen, vortex_pair, kelvin_helmholtz, random_turbulence
+from vpfm import (
+    Simulation,
+    Simulation3D,
+    lamb_oseen,
+    vortex_pair,
+    kelvin_helmholtz,
+    random_turbulence,
+)
 from vpfm.diagnostics.diagnostics import find_vortex_centroid, find_vortex_peak
 from vpfm.core.flow_map import DualScaleFlowMapIntegrator, DualScaleFlowMapState, _compose_jacobians
 from vpfm import Grid, ParticleSystem
@@ -216,6 +223,50 @@ class TestGradientEnhancedP2G:
         assert np.all(np.isfinite(sim.grid.q))
 
 
+class TestDualScaleSimulation:
+    """Integration tests for dual-scale flow maps in Simulation."""
+
+    def test_dual_scale_simulation_runs(self):
+        """Ensure dual-scale flow map runs and reinitializes."""
+        nx, ny = 16, 16
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+
+        sim = Simulation(
+            nx, ny, Lx, Ly, dt=0.01,
+            use_dual_scale=True,
+            dual_scale_nS=1,
+            dual_scale_nL=3,
+            use_gradient_p2g=False,
+        )
+
+        def ic(x, y):
+            return lamb_oseen(x, y, Lx/2, Ly/2, Gamma=2*np.pi, r0=0.5)
+
+        sim.set_initial_condition(ic)
+        sim.run(5, diag_interval=5, verbose=False)
+
+        assert sim.history["reinit_short_count"] >= 1
+        assert sim.history["reinit_long_count"] >= 1
+
+
+class TestArakawaBaseline:
+    """Tests for Arakawa scheme in the FD baseline."""
+
+    def test_fd_arakawa_runs(self):
+        """Ensure Arakawa advection runs without NaNs."""
+        nx, ny = 32, 32
+        Lx, Ly = 2 * np.pi, 2 * np.pi
+
+        def ic(x, y):
+            return lamb_oseen(x, y, Lx/2, Ly/2, Gamma=2*np.pi, r0=0.5)
+
+        sim = FiniteDifferenceSimulation(nx, ny, Lx, Ly, dt=0.01)
+        sim.set_initial_condition(ic)
+        sim.run(10, diag_interval=5, scheme="arakawa", verbose=False)
+
+        assert np.all(np.isfinite(sim.q))
+
+
 class TestDualScaleFlowMap:
     """Tests for dual-scale flow map integrator."""
 
@@ -370,6 +421,27 @@ class TestTurbulence:
         energies = np.array(sim.history['energy'])
         assert np.all(np.isfinite(energies))
         assert energies[-1] < 10 * energies[0]  # No blowup
+
+
+class TestSimulation3D:
+    """Smoke test for 3D simulation."""
+
+    def test_simulation3d_step(self):
+        """Ensure 3D simulation advances without NaNs."""
+        nx, ny, nz = 8, 8, 8
+        Lx = Ly = Lz = 2 * np.pi
+
+        sim = Simulation3D(nx=nx, ny=ny, nz=nz, Lx=Lx, Ly=Ly, Lz=Lz, dt=0.01)
+
+        def ic(x, y, z):
+            r2 = (x - Lx/2)**2 + (y - Ly/2)**2 + (z - Lz/2)**2
+            return np.exp(-r2 / 0.5)
+
+        sim.set_initial_condition(ic)
+        sim.advance()
+
+        assert np.all(np.isfinite(sim.grid.q))
+        assert np.all(np.isfinite(sim.grid.phi))
 
 
 class TestHasegawaWakatani:

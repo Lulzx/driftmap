@@ -207,8 +207,8 @@ def fftfreq(n, d):
         return cp.fft.fftfreq(n, d)
     elif name == 'mlx':
         import mlx.core as mx
-        # MLX uses similar API
-        return mx.fft.fftfreq(n, d=d)
+        # MLX does not implement fftfreq; use NumPy and convert.
+        return mx.array(np.fft.fftfreq(n, d))
     return np.fft.fftfreq(n, d)
 
 

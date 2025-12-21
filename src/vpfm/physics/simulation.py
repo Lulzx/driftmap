@@ -27,7 +27,7 @@ from ..core.kernels import (
 )
 from ..numerics.poisson import solve_poisson_hm
 from ..numerics.velocity import compute_velocity, compute_velocity_gradient
-from ..core.flow_map import FlowMapIntegrator, FlowMapState
+from ..core.flow_map import FlowMapIntegrator, DualScaleFlowMapIntegrator, FlowMapState
 from ..diagnostics.diagnostics import compute_diagnostics
 
 
@@ -59,6 +59,11 @@ class Simulation:
                  track_hessian: bool = True,
                  reinit_threshold: float = 2.0,
                  max_reinit_steps: int = 200,
+                 use_dual_scale: bool = False,
+                 dual_scale_nL: int = 100,
+                 dual_scale_nS: int = 20,
+                 dual_scale_error_long: float = 3.0,
+                 dual_scale_error_short: float = 1.0,
                  # Hasegawa-Wakatani physics parameters
                  alpha: float = 0.0,      # Adiabaticity (0 = pure HM, >0 = HW)
                  kappa: float = 0.0,      # Curvature drive
@@ -71,7 +76,8 @@ class Simulation:
                  adaptive_dt: bool = False,      # Use adaptive time stepping
                  cfl_number: float = 0.5,        # CFL number for adaptive dt
                  modified_hw: bool = False,      # Modified HW (remove ky=0 coupling)
-                 linear_hw: bool = False):       # Linear HW (disable advection)
+                 linear_hw: bool = False,        # Linear HW (disable advection)
+                 backend: str = "cpu"):          # Backend: 'cpu' or 'mlx'
         """Initialize simulation.
 
         Args:
@@ -83,6 +89,11 @@ class Simulation:
             track_hessian: Whether to track Hessian
             reinit_threshold: Error threshold for reinitialization
             max_reinit_steps: Maximum steps between reinits
+            use_dual_scale: Enable dual-scale flow maps (n_L/n_S)
+            dual_scale_nL: Long-map reinit interval for dual-scale
+            dual_scale_nS: Short-map reinit interval for dual-scale
+            dual_scale_error_long: Long-map error threshold
+            dual_scale_error_short: Short-map error threshold
             alpha: Adiabaticity parameter (α → ∞ is HM limit, α ~ 1 is HW)
             kappa: Background density gradient / curvature drive
             mu: Hyperviscosity coefficient for ∇⁴ζ
@@ -94,12 +105,78 @@ class Simulation:
             cfl_number: CFL number for adaptive time stepping
             modified_hw: If True, remove ky=0 component of the coupling term
             linear_hw: If True, disable advection and flow-map updates in HW
+            backend: Backend for FFT-heavy steps ('cpu' or 'mlx')
         """
         self.grid = Grid(nx, ny, Lx, Ly)
         self.particles = ParticleSystem.from_grid(self.grid, particles_per_cell)
 
         self.kernel = InterpolationKernel(kernel_order)
-        self.integrator = FlowMapIntegrator(self.grid, kernel_order, track_hessian)
+
+        self.backend = backend
+        self._use_mlx = False
+        self._mlx_ops = None
+        if backend == "mlx":
+            from ..backends.kernels_mlx import (
+                check_mlx_available,
+                solve_poisson_mlx,
+                compute_velocity_mlx,
+                compute_velocity_gradient_mlx,
+                P2G_mlx,
+                P2G_mlx_gradient_enhanced,
+                G2P_mlx,
+                G2P_mlx_with_gradient,
+                jacobian_rhs_mlx,
+                rk4_positions_mlx,
+                to_mlx,
+                to_numpy,
+                synchronize,
+            )
+            if not check_mlx_available():
+                raise RuntimeError("MLX backend requested but MLX is not available")
+            self._use_mlx = True
+            self._mlx_ops = {
+                "solve_poisson": solve_poisson_mlx,
+                "compute_velocity": compute_velocity_mlx,
+                "compute_velocity_gradient": compute_velocity_gradient_mlx,
+                "P2G": P2G_mlx,
+                "P2G_gradient": P2G_mlx_gradient_enhanced,
+                "G2P": G2P_mlx,
+                "G2P_with_gradient": G2P_mlx_with_gradient,
+                "jacobian_rhs": jacobian_rhs_mlx,
+                "rk4_positions": rk4_positions_mlx,
+                "to_mlx": to_mlx,
+                "to_numpy": to_numpy,
+                "sync": synchronize,
+            }
+        elif backend != "cpu":
+            raise ValueError(f"Unsupported backend '{backend}'. Use 'cpu' or 'mlx'.")
+
+        self.use_dual_scale = use_dual_scale
+        self.dual_scale_nL = dual_scale_nL
+        self.dual_scale_nS = dual_scale_nS
+        self.dual_scale_error_long = dual_scale_error_long
+        self.dual_scale_error_short = dual_scale_error_short
+
+        if self.use_dual_scale:
+            self.integrator = DualScaleFlowMapIntegrator(
+                self.grid,
+                kernel_order,
+                track_hessian,
+                n_L=dual_scale_nL,
+                n_S=dual_scale_nS,
+                error_threshold_long=dual_scale_error_long,
+                error_threshold_short=dual_scale_error_short,
+                backend=backend,
+                mlx_ops=self._mlx_ops,
+            )
+        else:
+            self.integrator = FlowMapIntegrator(
+                self.grid,
+                kernel_order,
+                track_hessian,
+                backend=backend,
+                mlx_ops=self._mlx_ops,
+            )
         self.flow_map = self.integrator.initialize_flow_map(self.particles.n_particles)
 
         self.time = 0.0
@@ -144,6 +221,8 @@ class Simulation:
             'max_q': [],
             'max_jacobian_dev': [],
             'reinit_count': 0,
+            'reinit_short_count': 0,
+            'reinit_long_count': 0,
             # HW-specific diagnostics
             'density_variance': [],
             'particle_flux': [],
@@ -166,12 +245,37 @@ class Simulation:
         self._p2g()
 
         # Initial solve
-        self.grid.phi = solve_poisson_hm(self.grid.q, self.grid.Lx, self.grid.Ly)
-        compute_velocity(self.grid)
-        compute_velocity_gradient(self.grid)
+        phi_mx = self._solve_poisson_hm()
+        self._compute_velocity_fields(phi_mx)
 
     def _p2g(self):
         """Particle to grid transfer using B-spline kernel."""
+        if self._use_mlx and self.kernel.order == "quadratic":
+            px = np.asarray(self.particles.x, dtype=np.float32)
+            py = np.asarray(self.particles.y, dtype=np.float32)
+            pq = np.asarray(self.particles.q, dtype=np.float32)
+            px_mx = self._mlx_ops["to_mlx"](px)
+            py_mx = self._mlx_ops["to_mlx"](py)
+            pq_mx = self._mlx_ops["to_mlx"](pq)
+
+            if self.use_gradient_p2g and hasattr(self.particles, "grad_q_x"):
+                gx = np.asarray(self.particles.grad_q_x, dtype=np.float32)
+                gy = np.asarray(self.particles.grad_q_y, dtype=np.float32)
+                gx_mx = self._mlx_ops["to_mlx"](gx)
+                gy_mx = self._mlx_ops["to_mlx"](gy)
+                q_mx = self._mlx_ops["P2G_gradient"](
+                    px_mx, py_mx, pq_mx, gx_mx, gy_mx,
+                    self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy
+                )
+            else:
+                q_mx = self._mlx_ops["P2G"](
+                    px_mx, py_mx, pq_mx,
+                    self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy
+                )
+            self.grid.q = self._mlx_ops["to_numpy"](q_mx)
+            self._mlx_ops["sync"]()
+            return
+
         if self.use_gradient_p2g and hasattr(self.particles, 'grad_q_x'):
             # Use gradient-enhanced P2G for improved accuracy
             self.grid.q = P2G_bspline_gradient_enhanced(
@@ -190,6 +294,20 @@ class Simulation:
 
     def _p2g_standard(self):
         """Particle to grid transfer without gradient enhancement."""
+        if self._use_mlx and self.kernel.order == "quadratic":
+            px = np.asarray(self.particles.x, dtype=np.float32)
+            py = np.asarray(self.particles.y, dtype=np.float32)
+            pq = np.asarray(self.particles.q, dtype=np.float32)
+            q_mx = self._mlx_ops["P2G"](
+                self._mlx_ops["to_mlx"](px),
+                self._mlx_ops["to_mlx"](py),
+                self._mlx_ops["to_mlx"](pq),
+                self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy
+            )
+            self.grid.q = self._mlx_ops["to_numpy"](q_mx)
+            self._mlx_ops["sync"]()
+            return
+
         self.grid.q = P2G_bspline(
             self.particles.x, self.particles.y, self.particles.q,
             self.grid.nx, self.grid.ny, self.grid.dx, self.grid.dy,
@@ -198,6 +316,20 @@ class Simulation:
 
     def _g2p(self):
         """Grid to particle transfer for reinitialization."""
+        if self._use_mlx and self.kernel.order == "quadratic":
+            px = np.asarray(self.particles.x, dtype=np.float32)
+            py = np.asarray(self.particles.y, dtype=np.float32)
+            grid_q = np.asarray(self.grid.q, dtype=np.float32)
+            q_mx = self._mlx_ops["G2P"](
+                self._mlx_ops["to_mlx"](grid_q),
+                self._mlx_ops["to_mlx"](px),
+                self._mlx_ops["to_mlx"](py),
+                self.grid.dx, self.grid.dy
+            )
+            self.particles.q = self._mlx_ops["to_numpy"](q_mx)
+            self._mlx_ops["sync"]()
+            return
+
         self.particles.q = G2P_bspline(
             self.grid.q, self.particles.x, self.particles.y,
             self.grid.dx, self.grid.dy, self.kernel
@@ -205,14 +337,46 @@ class Simulation:
 
     def _g2p_with_gradient(self):
         """Grid to particle transfer including gradient computation."""
-        self.particles.q, self.particles.grad_q_x, self.particles.grad_q_y = \
+        if self._use_mlx and self.kernel.order == "quadratic":
+            px = np.asarray(self.particles.x, dtype=np.float32)
+            py = np.asarray(self.particles.y, dtype=np.float32)
+            grid_q = np.asarray(self.grid.q, dtype=np.float32)
+            q_mx, gx_mx, gy_mx = self._mlx_ops["G2P_with_gradient"](
+                self._mlx_ops["to_mlx"](grid_q),
+                self._mlx_ops["to_mlx"](px),
+                self._mlx_ops["to_mlx"](py),
+                self.grid.dx, self.grid.dy
+            )
+            self.particles.q = self._mlx_ops["to_numpy"](q_mx)
+            self.particles.grad_q_x = self._mlx_ops["to_numpy"](gx_mx)
+            self.particles.grad_q_y = self._mlx_ops["to_numpy"](gy_mx)
+            self._mlx_ops["sync"]()
+            return
+
+        self.particles.q, self.particles.grad_q_x, self.particles.grad_q_y = (
             G2P_bspline_with_gradient(
                 self.grid.q, self.particles.x, self.particles.y,
                 self.grid.dx, self.grid.dy, self.kernel
             )
+        )
 
     def _update_particle_gradients_from_grid(self):
         """Update particle gradients from the current grid without overwriting values."""
+        if self._use_mlx and self.kernel.order == "quadratic":
+            px = np.asarray(self.particles.x, dtype=np.float32)
+            py = np.asarray(self.particles.y, dtype=np.float32)
+            grid_q = np.asarray(self.grid.q, dtype=np.float32)
+            _, grad_x_mx, grad_y_mx = self._mlx_ops["G2P_with_gradient"](
+                self._mlx_ops["to_mlx"](grid_q),
+                self._mlx_ops["to_mlx"](px),
+                self._mlx_ops["to_mlx"](py),
+                self.grid.dx, self.grid.dy
+            )
+            self.particles.grad_q_x = self._mlx_ops["to_numpy"](grad_x_mx)
+            self.particles.grad_q_y = self._mlx_ops["to_numpy"](grad_y_mx)
+            self._mlx_ops["sync"]()
+            return
+
         _, grad_x, grad_y = G2P_bspline_with_gradient(
             self.grid.q, self.particles.x, self.particles.y,
             self.grid.dx, self.grid.dy, self.kernel
@@ -247,28 +411,99 @@ class Simulation:
         # Don't exceed user-specified dt
         return min(dt_cfl, self.dt)
 
+    def _estimate_flow_map_error(self) -> float:
+        """Estimate flow-map error for diagnostics."""
+        if self.use_dual_scale:
+            return self.integrator.estimate_long_error(self.flow_map)
+        return self.integrator.estimate_error(self.flow_map)
+
     def reinitialize(self):
         """Reinitialize flow map."""
         # Current grid field is up to date from last P2G
-        if self.use_gradient_p2g:
-            # Use G2P with gradient to update both value and gradient
-            self._g2p_with_gradient()
-            # Reset flow map state
-            self.integrator.reinitialize(
-                self.particles, self.flow_map, self.grid.q
-            )
+        if self.use_dual_scale:
+            # Full (long) reinitialization for dual-scale flow map
+            new_q = self.integrator.reinit_long(self.particles, self.flow_map, self.grid.q)
+            if self.use_gradient_p2g:
+                self._g2p_with_gradient()
+            else:
+                self.particles.q = new_q
+            self.history['reinit_long_count'] += 1
+            self.history['reinit_count'] = self.history['reinit_long_count']
         else:
-            self.particles.q = self.integrator.reinitialize(
-                self.particles, self.flow_map, self.grid.q
-            )
-        self.history['reinit_count'] += 1
+            if self.use_gradient_p2g:
+                # Use G2P with gradient to update both value and gradient
+                self._g2p_with_gradient()
+                # Reset flow map state
+                self.integrator.reinitialize(
+                    self.particles, self.flow_map, self.grid.q
+                )
+            else:
+                self.particles.q = self.integrator.reinitialize(
+                    self.particles, self.flow_map, self.grid.q
+                )
+            self.history['reinit_count'] += 1
+
+    def _maybe_reinitialize_hm(self):
+        """Handle flow-map reinitialization for HM."""
+        if not self.use_dual_scale:
+            if self.integrator.should_reinitialize(
+                self.flow_map, self.reinit_threshold, self.max_reinit_steps
+            ):
+                self._p2g()
+                self.reinitialize()
+            return
+
+        if self.integrator.should_reinit_long(self.flow_map):
+            self._p2g()
+            self.reinitialize()
+            return
+
+        if self.integrator.should_reinit_short(self.flow_map):
+            self._p2g()
+            self.integrator.reinit_short(self.particles, self.flow_map, self.grid.q)
+            if self.use_gradient_p2g:
+                self._update_particle_gradients_from_grid()
+            self.history['reinit_short_count'] += 1
 
     def _refresh_grid_fields_hm(self):
         """Refresh HM grid fields from current particles."""
         self._p2g()
+        phi_mx = self._solve_poisson_hm()
+        self._compute_velocity_fields(phi_mx)
+
+    def _compute_velocity_fields(self, phi_mx=None):
+        """Compute velocity and gradients using the active backend."""
+        if self._use_mlx:
+            if phi_mx is None:
+                phi_mx = self._mlx_ops["to_mlx"](self.grid.phi)
+            vx_mx, vy_mx = self._mlx_ops["compute_velocity"](
+                phi_mx, self.grid.Lx, self.grid.Ly
+            )
+            dvx_dx, dvx_dy, dvy_dx, dvy_dy = self._mlx_ops["compute_velocity_gradient"](
+                vx_mx, vy_mx, self.grid.Lx, self.grid.Ly
+            )
+            self.grid.vx = self._mlx_ops["to_numpy"](vx_mx)
+            self.grid.vy = self._mlx_ops["to_numpy"](vy_mx)
+            self.grid.dvx_dx = self._mlx_ops["to_numpy"](dvx_dx)
+            self.grid.dvx_dy = self._mlx_ops["to_numpy"](dvx_dy)
+            self.grid.dvy_dx = self._mlx_ops["to_numpy"](dvy_dx)
+            self.grid.dvy_dy = self._mlx_ops["to_numpy"](dvy_dy)
+            self._mlx_ops["sync"]()
+        else:
+            compute_velocity(self.grid)
+            compute_velocity_gradient(self.grid)
+
+    def _solve_poisson_hm(self):
+        """Solve HM Poisson equation using active backend."""
+        if self._use_mlx:
+            q_mx = self._mlx_ops["to_mlx"](self.grid.q)
+            phi_mx = self._mlx_ops["solve_poisson"](
+                q_mx, self.grid.Lx, self.grid.Ly, modified=True
+            )
+            self.grid.phi = self._mlx_ops["to_numpy"](phi_mx)
+            return phi_mx
         self.grid.phi = solve_poisson_hm(self.grid.q, self.grid.Lx, self.grid.Ly)
-        compute_velocity(self.grid)
-        compute_velocity_gradient(self.grid)
+        return None
 
     # ========================================================================
     # Hasegawa-Mima (pure advection) methods
@@ -280,34 +515,33 @@ class Simulation:
         self._p2g()
 
         # 2. Poisson solve: (∇² - 1)φ = -q
-        self.grid.phi = solve_poisson_hm(self.grid.q, self.grid.Lx, self.grid.Ly)
+        phi_mx = self._solve_poisson_hm()
 
         # 3. Compute velocity and gradients
-        compute_velocity(self.grid)
-        compute_velocity_gradient(self.grid)
+        self._compute_velocity_fields(phi_mx)
 
         # 4. Compute timestep (adaptive or fixed)
         dt_step = self.compute_adaptive_dt() if self.adaptive_dt else self.dt
 
         # 5. Flow map evolution (Jacobian, Hessian, positions)
-        self.integrator.step(
-            self.particles,
-            self.flow_map,
-            dt_step,
-            update_gradients=self.use_gradient_p2g,
-        )
+        if self.use_dual_scale:
+            self.integrator.step(self.particles, self.flow_map, dt_step)
+            if self.use_gradient_p2g:
+                self.integrator.evolve_particle_gradients_rk4(self.particles, dt_step)
+        else:
+            self.integrator.step(
+                self.particles,
+                self.flow_map,
+                dt_step,
+                update_gradients=self.use_gradient_p2g,
+            )
 
         # 6. Update time
         self.time += dt_step
         self.step += 1
 
         # 7. Check for reinitialization
-        if self.integrator.should_reinitialize(
-            self.flow_map, self.reinit_threshold, self.max_reinit_steps
-        ):
-            # Update grid from current particle positions before projection
-            self._p2g()
-            self.reinitialize()
+        self._maybe_reinitialize_hm()
 
     def run(self,
             n_steps: int,
@@ -331,7 +565,7 @@ class Simulation:
             if (self.step % diag_interval == 0) or (i == n_steps - 1):
                 self._refresh_grid_fields_hm()
                 diag = compute_diagnostics(self.grid)
-                max_jac = self.integrator.estimate_error(self.flow_map)
+                max_jac = self._estimate_flow_map_error()
 
                 self.history['time'].append(self.time)
                 self.history['energy'].append(diag['energy'])
@@ -377,9 +611,8 @@ class Simulation:
         self._p2g_density()
 
         # Initial solve (standard Poisson for HW: ∇²φ = ζ)
-        self._solve_poisson_hw()
-        compute_velocity(self.grid)
-        compute_velocity_gradient(self.grid)
+        phi_mx = self._solve_poisson_hw()
+        self._compute_velocity_fields(phi_mx)
 
     def _p2g_density(self):
         """Transfer density from particles to grid."""
@@ -395,6 +628,14 @@ class Simulation:
         Unlike HM which uses (∇² - 1)φ = -ζ, HW uses the standard
         Poisson equation since ζ = ∇²φ directly.
         """
+        if self._use_mlx:
+            zeta_mx = self._mlx_ops["to_mlx"](self.grid.q)
+            phi_mx = self._mlx_ops["solve_poisson"](
+                zeta_mx, self.grid.Lx, self.grid.Ly, modified=False
+            )
+            self.grid.phi = self._mlx_ops["to_numpy"](phi_mx)
+            return phi_mx
+
         zeta_hat = fft2(self.grid.q)
 
         # Avoid division by zero at k=0
@@ -405,6 +646,7 @@ class Simulation:
         phi_hat[0, 0] = 0  # Zero mean potential
 
         self.grid.phi = np.real(ifft2(phi_hat))
+        return None
 
     def _compute_grid_gradient(self, field: np.ndarray) -> tuple:
         """Compute spectral gradients of a grid field."""
@@ -417,9 +659,8 @@ class Simulation:
         """Refresh HW grid fields from current particles."""
         self._p2g()
         self._p2g_density()
-        self._solve_poisson_hw()
-        compute_velocity(self.grid)
-        compute_velocity_gradient(self.grid)
+        phi_mx = self._solve_poisson_hw()
+        self._compute_velocity_fields(phi_mx)
 
     def _compute_hw_sources(self) -> tuple:
         """Compute Hasegawa-Wakatani source terms.
@@ -508,11 +749,10 @@ class Simulation:
         self._p2g_density()
 
         # 2. Poisson solve for potential
-        self._solve_poisson_hw()
+        phi_mx = self._solve_poisson_hw()
 
         # 3. Compute velocity and gradients
-        compute_velocity(self.grid)
-        compute_velocity_gradient(self.grid)
+        self._compute_velocity_fields(phi_mx)
 
         # 4. Compute timestep (adaptive or fixed)
         dt_step = self.compute_adaptive_dt() if self.adaptive_dt else self.dt
@@ -538,12 +778,17 @@ class Simulation:
         # 7. Flow map evolution (Jacobian, Hessian, positions)
         # This advects particles - vorticity transport is EXACT here
         if not self.linear_hw:
-            self.integrator.step(
-                self.particles,
-                self.flow_map,
-                dt_step,
-                update_gradients=self.use_gradient_p2g,
-            )
+            if self.use_dual_scale:
+                self.integrator.step(self.particles, self.flow_map, dt_step)
+                if self.use_gradient_p2g:
+                    self.integrator.evolve_particle_gradients_rk4(self.particles, dt_step)
+            else:
+                self.integrator.step(
+                    self.particles,
+                    self.flow_map,
+                    dt_step,
+                    update_gradients=self.use_gradient_p2g,
+                )
 
         # 8. Update time
         self.time += dt_step
@@ -551,16 +796,23 @@ class Simulation:
 
         # 9. Check for reinitialization
         if not self.linear_hw:
-            if self.integrator.should_reinitialize(
-                self.flow_map, self.reinit_threshold, self.max_reinit_steps
-            ):
-                self._reinitialize_hw()
+            if self.use_dual_scale:
+                self._maybe_reinitialize_hw()
+            else:
+                if self.integrator.should_reinitialize(
+                    self.flow_map, self.reinit_threshold, self.max_reinit_steps
+                ):
+                    self._reinitialize_hw()
 
     def _reinitialize_hw(self):
         """Reinitialize flow map for HW simulation.
 
         Must handle both vorticity and density fields.
         """
+        if self.use_dual_scale:
+            self._reinitialize_hw_dual()
+            return
+
         # Update grid fields
         self._p2g()
         self._p2g_density()
@@ -582,6 +834,39 @@ class Simulation:
         self.n_particles = self._interpolate_to_particles(self.n_grid)
 
         self.history['reinit_count'] += 1
+
+    def _reinitialize_hw_dual(self):
+        """Full (long) reinitialization for HW with dual-scale flow maps."""
+        # Update grid fields
+        self._p2g()
+        self._p2g_density()
+
+        # Reset flow map and update vorticity from grid
+        new_q = self.integrator.reinit_long(self.particles, self.flow_map, self.grid.q)
+        if self.use_gradient_p2g:
+            self._g2p_with_gradient()
+        else:
+            self.particles.q = new_q
+
+        # Reinitialize density
+        self.n_particles = self._interpolate_to_particles(self.n_grid)
+
+        self.history['reinit_long_count'] += 1
+        self.history['reinit_count'] = self.history['reinit_long_count']
+
+    def _maybe_reinitialize_hw(self):
+        """Handle dual-scale reinitialization for HW."""
+        if self.integrator.should_reinit_long(self.flow_map):
+            self._reinitialize_hw_dual()
+            return
+
+        if self.integrator.should_reinit_short(self.flow_map):
+            self._p2g()
+            self._p2g_density()
+            self.integrator.reinit_short(self.particles, self.flow_map, self.grid.q)
+            if self.use_gradient_p2g:
+                self._update_particle_gradients_from_grid()
+            self.history['reinit_short_count'] += 1
 
     def compute_hw_diagnostics(self) -> dict:
         """Compute Hasegawa-Wakatani specific diagnostics.
@@ -656,7 +941,7 @@ class Simulation:
             if (self.step % diag_interval == 0) or (i == n_steps - 1):
                 self._refresh_grid_fields_hw()
                 diag = self.compute_hw_diagnostics()
-                max_jac = self.integrator.estimate_error(self.flow_map)
+                max_jac = self._estimate_flow_map_error()
 
                 self.history['time'].append(self.time)
                 self.history['energy'].append(diag['energy'])
@@ -682,4 +967,3 @@ class Simulation:
 
 # Backward compatibility alias
 SimulationV2 = Simulation
-

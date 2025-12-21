@@ -28,6 +28,10 @@ def check_mlx_available() -> bool:
 
 
 if MLX_AVAILABLE:
+    def _fftfreq_mlx(n: int, d: float) -> mx.array:
+        """MLX-compatible fftfreq using NumPy for frequency bins."""
+        return mx.array(np.fft.fftfreq(n, d))
+
     # =========================================================================
     # B-spline kernel functions for MLX
     # =========================================================================
@@ -63,16 +67,7 @@ if MLX_AVAILABLE:
                 nx: int, ny: int, dx: float, dy: float) -> mx.array:
         """MLX-accelerated P2G transfer with quadratic B-spline.
 
-        Uses scatter-add operations for atomic accumulation.
-
-        Args:
-            px, py: Particle positions (MLX arrays)
-            pq: Particle values (MLX array)
-            nx, ny: Grid dimensions
-            dx, dy: Grid spacing
-
-        Returns:
-            Grid values (MLX array)
+        Uses vectorized scatter-add via mx.at.
         """
         n_particles = px.shape[0]
         inv_dx = 1.0 / dx
@@ -90,37 +85,30 @@ if MLX_AVAILABLE:
         fx = x_norm - (base_i.astype(mx.float32) + 1)
         fy = y_norm - (base_j.astype(mx.float32) + 1)
 
-        # Initialize grids
+        # Compute all weights for 3x3 stencil
+        di_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
+        dj_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
+
+        xi = di_offsets[None, :] - fx[:, None]  # (n, 3)
+        yj = dj_offsets[None, :] - fy[:, None]  # (n, 3)
+        wx = _quadratic_bspline_mlx(xi)         # (n, 3)
+        wy = _quadratic_bspline_mlx(yj)         # (n, 3)
+
+        weights = wx[:, :, None] * wy[:, None, :]  # (n, 3, 3)
+
+        gi = (base_i[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % nx
+        gj = (base_j[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % ny
+
+        gi_flat = mx.broadcast_to(gi[:, :, None], (n_particles, 3, 3)).reshape(-1)
+        gj_flat = mx.broadcast_to(gj[:, None, :], (n_particles, 3, 3)).reshape(-1)
+        weights_flat = weights.reshape(-1)
+        pq_flat = mx.broadcast_to(pq[:, None, None], (n_particles, 3, 3)).reshape(-1)
+
         q_grid = mx.zeros((nx, ny))
         weight_grid = mx.zeros((nx, ny))
 
-        # 3x3 stencil for quadratic B-spline
-        for di in range(3):
-            xi = (di - 1) - fx
-            wx = _quadratic_bspline_mlx(xi)
-            gi = (base_i + di) % nx
-
-            for dj in range(3):
-                yj = (dj - 1) - fy
-                wy = _quadratic_bspline_mlx(yj)
-                gj = (base_j + dj) % ny
-
-                w = wx * wy
-
-                # Scatter add - accumulate contributions
-                # Create flat indices
-                flat_idx = gi * ny + gj
-
-                # Use scatter to accumulate
-                contributions = w * pq
-                weight_contributions = w
-
-                # Accumulate using index_put equivalent
-                for p in range(n_particles):
-                    idx_i = int(gi[p].item())
-                    idx_j = int(gj[p].item())
-                    q_grid = q_grid.at[idx_i, idx_j].add(contributions[p])
-                    weight_grid = weight_grid.at[idx_i, idx_j].add(weight_contributions[p])
+        q_grid = q_grid.at[gi_flat, gj_flat].add(weights_flat * pq_flat)
+        weight_grid = weight_grid.at[gi_flat, gj_flat].add(weights_flat)
 
         # Normalize
         safe_weight = mx.where(weight_grid > 1e-10, weight_grid, mx.ones_like(weight_grid))
@@ -130,74 +118,58 @@ if MLX_AVAILABLE:
 
     def P2G_mlx_vectorized(px: mx.array, py: mx.array, pq: mx.array,
                            nx: int, ny: int, dx: float, dy: float) -> mx.array:
-        """Fully vectorized P2G using MLX operations.
+        """Alias for P2G_mlx (kept for backwards compatibility)."""
+        return P2G_mlx(px, py, pq, nx, ny, dx, dy)
 
-        This version avoids Python loops for better performance.
-        """
+    def P2G_mlx_gradient_enhanced(
+        px: mx.array, py: mx.array, pq: mx.array,
+        grad_q_x: mx.array, grad_q_y: mx.array,
+        nx: int, ny: int, dx: float, dy: float
+    ) -> mx.array:
+        """Gradient-enhanced P2G with quadratic B-spline."""
         n_particles = px.shape[0]
         inv_dx = 1.0 / dx
         inv_dy = 1.0 / dy
 
-        # Normalize positions
         x_norm = px * inv_dx
         y_norm = py * inv_dy
 
-        # Base indices
         base_i = mx.floor(x_norm + 0.5).astype(mx.int32) - 1
         base_j = mx.floor(y_norm + 0.5).astype(mx.int32) - 1
 
-        # Fractional positions
         fx = x_norm - (base_i.astype(mx.float32) + 1)
         fy = y_norm - (base_j.astype(mx.float32) + 1)
 
-        # Compute all weights for 3x3 stencil
-        # Shape: (n_particles, 3)
         di_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
         dj_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
 
-        # Compute x weights: (n_particles, 3)
         xi = di_offsets[None, :] - fx[:, None]  # (n, 3)
-        wx = _quadratic_bspline_mlx(xi)
-
-        # Compute y weights: (n_particles, 3)
         yj = dj_offsets[None, :] - fy[:, None]  # (n, 3)
+        wx = _quadratic_bspline_mlx(xi)
         wy = _quadratic_bspline_mlx(yj)
 
-        # Combined weights: (n_particles, 3, 3)
         weights = wx[:, :, None] * wy[:, None, :]  # (n, 3, 3)
 
-        # Grid indices: (n_particles, 3)
+        delta_x = xi[:, :, None] * dx
+        delta_y = yj[:, None, :] * dy
+        q_enhanced = (pq[:, None, None] +
+                      grad_q_x[:, None, None] * delta_x +
+                      grad_q_y[:, None, None] * delta_y)
+
         gi = (base_i[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % nx
         gj = (base_j[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % ny
 
-        # Flatten for scatter
-        # Each particle contributes to 9 grid points
         gi_flat = mx.broadcast_to(gi[:, :, None], (n_particles, 3, 3)).reshape(-1)
         gj_flat = mx.broadcast_to(gj[:, None, :], (n_particles, 3, 3)).reshape(-1)
         weights_flat = weights.reshape(-1)
-        pq_expanded = mx.broadcast_to(pq[:, None, None], (n_particles, 3, 3)).reshape(-1)
+        q_flat = q_enhanced.reshape(-1)
 
-        contributions = weights_flat * pq_expanded
+        q_grid = mx.zeros((nx, ny))
+        weight_grid = mx.zeros((nx, ny))
 
-        # Use scatter add via put_along_axis or manual accumulation
-        # MLX doesn't have direct scatter_add, so we use a workaround
-        flat_idx = gi_flat * ny + gj_flat
+        q_grid = q_grid.at[gi_flat, gj_flat].add(weights_flat * q_flat)
+        weight_grid = weight_grid.at[gi_flat, gj_flat].add(weights_flat)
 
-        # Create output arrays
-        q_flat = mx.zeros(nx * ny)
-        w_flat = mx.zeros(nx * ny)
-
-        # Accumulate (this is still sequential but in MLX)
-        # For production, you'd want to use segment_sum or similar
-        for i in range(len(flat_idx)):
-            idx = int(flat_idx[i].item())
-            q_flat = q_flat.at[idx].add(contributions[i])
-            w_flat = w_flat.at[idx].add(weights_flat[i])
-
-        q_grid = q_flat.reshape(nx, ny)
-        weight_grid = w_flat.reshape(nx, ny)
-
-        # Normalize
         safe_weight = mx.where(weight_grid > 1e-10, weight_grid, mx.ones_like(weight_grid))
         q_grid = mx.where(weight_grid > 1e-10, q_grid / safe_weight, q_grid)
 
@@ -209,67 +181,81 @@ if MLX_AVAILABLE:
 
     def G2P_mlx(grid_field: mx.array, px: mx.array, py: mx.array,
                 dx: float, dy: float) -> mx.array:
-        """MLX-accelerated G2P interpolation with quadratic B-spline.
-
-        Args:
-            grid_field: Grid values (MLX array, shape nx x ny)
-            px, py: Particle positions (MLX arrays)
-            dx, dy: Grid spacing
-
-        Returns:
-            Interpolated values at particle positions (MLX array)
-        """
+        """MLX-accelerated G2P interpolation with quadratic B-spline."""
         nx, ny = grid_field.shape
-        n_particles = px.shape[0]
         inv_dx = 1.0 / dx
         inv_dy = 1.0 / dy
 
-        # Normalize positions
         x_norm = px * inv_dx
         y_norm = py * inv_dy
 
-        # Base indices
         base_i = mx.floor(x_norm + 0.5).astype(mx.int32) - 1
         base_j = mx.floor(y_norm + 0.5).astype(mx.int32) - 1
 
-        # Fractional positions
         fx = x_norm - (base_i.astype(mx.float32) + 1)
         fy = y_norm - (base_j.astype(mx.float32) + 1)
 
-        # Compute weights
         di_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
-        xi = di_offsets[None, :] - fx[:, None]
-        wx = _quadratic_bspline_mlx(xi)  # (n, 3)
-
         dj_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
+
+        xi = di_offsets[None, :] - fx[:, None]
         yj = dj_offsets[None, :] - fy[:, None]
-        wy = _quadratic_bspline_mlx(yj)  # (n, 3)
+        wx = _quadratic_bspline_mlx(xi)
+        wy = _quadratic_bspline_mlx(yj)
 
-        # Grid indices
-        gi = (base_i[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % nx  # (n, 3)
-        gj = (base_j[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % ny  # (n, 3)
+        weights = wx[:, :, None] * wy[:, None, :]
 
-        # Gather grid values and compute weighted sum
-        values = mx.zeros(n_particles)
+        gi = (base_i[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % nx
+        gj = (base_j[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % ny
 
-        for di in range(3):
-            for dj in range(3):
-                # Get grid indices for this stencil point
-                idx_i = gi[:, di]
-                idx_j = gj[:, dj]
+        flat_idx = gi[:, :, None] * ny + gj[:, None, :]
+        grid_flat = grid_field.reshape(-1)
+        values = mx.take(grid_flat, flat_idx)
 
-                # Gather values (need to do this per-particle for now)
-                gathered = mx.zeros(n_particles)
-                for p in range(n_particles):
-                    ii = int(idx_i[p].item())
-                    jj = int(idx_j[p].item())
-                    gathered = gathered.at[p].add(grid_field[ii, jj])
+        return mx.sum(weights * values, axis=(1, 2))
 
-                # Accumulate weighted contribution
-                w = wx[:, di] * wy[:, dj]
-                values = values + w * gathered
+    def G2P_mlx_with_gradient(grid_field: mx.array, px: mx.array, py: mx.array,
+                              dx: float, dy: float) -> Tuple[mx.array, mx.array, mx.array]:
+        """MLX G2P interpolation returning value and gradients."""
+        nx, ny = grid_field.shape
+        inv_dx = 1.0 / dx
+        inv_dy = 1.0 / dy
 
-        return values
+        x_norm = px * inv_dx
+        y_norm = py * inv_dy
+
+        base_i = mx.floor(x_norm + 0.5).astype(mx.int32) - 1
+        base_j = mx.floor(y_norm + 0.5).astype(mx.int32) - 1
+
+        fx = x_norm - (base_i.astype(mx.float32) + 1)
+        fy = y_norm - (base_j.astype(mx.float32) + 1)
+
+        di_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
+        dj_offsets = mx.array([-1, 0, 1], dtype=mx.float32)
+
+        xi = di_offsets[None, :] - fx[:, None]
+        yj = dj_offsets[None, :] - fy[:, None]
+        wx = _quadratic_bspline_mlx(xi)
+        wy = _quadratic_bspline_mlx(yj)
+        dwx = _quadratic_bspline_deriv_mlx(xi) * inv_dx
+        dwy = _quadratic_bspline_deriv_mlx(yj) * inv_dy
+
+        weights = wx[:, :, None] * wy[:, None, :]
+        grad_x_w = dwx[:, :, None] * wy[:, None, :]
+        grad_y_w = wx[:, :, None] * dwy[:, None, :]
+
+        gi = (base_i[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % nx
+        gj = (base_j[:, None] + mx.array([0, 1, 2], dtype=mx.int32)[None, :]) % ny
+
+        flat_idx = gi[:, :, None] * ny + gj[:, None, :]
+        grid_flat = grid_field.reshape(-1)
+        values = mx.take(grid_flat, flat_idx)
+
+        val = mx.sum(weights * values, axis=(1, 2))
+        grad_x = mx.sum(grad_x_w * values, axis=(1, 2))
+        grad_y = mx.sum(grad_y_w * values, axis=(1, 2))
+
+        return val, grad_x, grad_y
 
     # =========================================================================
     # Jacobian RHS using MLX
@@ -350,8 +336,8 @@ if MLX_AVAILABLE:
         nx, ny = rhs.shape
 
         # Wave numbers
-        kx = mx.fft.fftfreq(nx, d=Lx/nx) * 2 * mx.pi
-        ky = mx.fft.fftfreq(ny, d=Ly/ny) * 2 * mx.pi
+        kx = _fftfreq_mlx(nx, d=Lx / nx) * 2 * mx.pi
+        ky = _fftfreq_mlx(ny, d=Ly / ny) * 2 * mx.pi
         KX, KY = mx.meshgrid(kx, ky, indexing='ij')
         K2 = KX**2 + KY**2
 
@@ -368,11 +354,54 @@ if MLX_AVAILABLE:
             denom = mx.where(mx.abs(denom) < 1e-10, mx.ones_like(denom), denom)
 
         phi_hat = -rhs_hat / denom
-        phi_hat = phi_hat.at[0, 0].add(-phi_hat[0, 0])  # Zero mean
+        # Zero out mean without complex scatter (not supported on MLX GPU).
+        i = mx.arange(nx)[:, None]
+        j = mx.arange(ny)[None, :]
+        mask = mx.where((i == 0) & (j == 0), 0.0, 1.0)
+        phi_hat = phi_hat * mask
 
         phi = mx.real(mx.fft.ifft2(phi_hat))
 
         return phi
+
+    # =========================================================================
+    # Velocity computation using MLX FFTs
+    # =========================================================================
+
+    def compute_velocity_mlx(phi: mx.array, Lx: float, Ly: float) -> Tuple[mx.array, mx.array]:
+        """Compute E×B velocity from potential using MLX FFTs."""
+        nx, ny = phi.shape
+
+        kx = _fftfreq_mlx(nx, d=Lx / nx) * 2 * mx.pi
+        ky = _fftfreq_mlx(ny, d=Ly / ny) * 2 * mx.pi
+        KX, KY = mx.meshgrid(kx, ky, indexing='ij')
+
+        phi_hat = mx.fft.fft2(phi)
+        dphi_dx = mx.real(mx.fft.ifft2(1j * KX * phi_hat))
+        dphi_dy = mx.real(mx.fft.ifft2(1j * KY * phi_hat))
+
+        vx = -dphi_dy
+        vy = dphi_dx
+        return vx, vy
+
+    def compute_velocity_gradient_mlx(vx: mx.array, vy: mx.array,
+                                      Lx: float, Ly: float) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
+        """Compute velocity gradients using MLX FFTs."""
+        nx, ny = vx.shape
+
+        kx = _fftfreq_mlx(nx, d=Lx / nx) * 2 * mx.pi
+        ky = _fftfreq_mlx(ny, d=Ly / ny) * 2 * mx.pi
+        KX, KY = mx.meshgrid(kx, ky, indexing='ij')
+
+        vx_hat = mx.fft.fft2(vx)
+        vy_hat = mx.fft.fft2(vy)
+
+        dvx_dx = mx.real(mx.fft.ifft2(1j * KX * vx_hat))
+        dvx_dy = mx.real(mx.fft.ifft2(1j * KY * vx_hat))
+        dvy_dx = mx.real(mx.fft.ifft2(1j * KX * vy_hat))
+        dvy_dy = mx.real(mx.fft.ifft2(1j * KY * vy_hat))
+
+        return dvx_dx, dvx_dy, dvy_dx, dvy_dy
 
     # =========================================================================
     # Utility functions
@@ -396,7 +425,13 @@ else:
     def P2G_mlx(*args, **kwargs):
         raise RuntimeError("MLX not available")
 
+    def P2G_mlx_gradient_enhanced(*args, **kwargs):
+        raise RuntimeError("MLX not available")
+
     def G2P_mlx(*args, **kwargs):
+        raise RuntimeError("MLX not available")
+
+    def G2P_mlx_with_gradient(*args, **kwargs):
         raise RuntimeError("MLX not available")
 
     def jacobian_rhs_mlx(*args, **kwargs):
@@ -406,6 +441,12 @@ else:
         raise RuntimeError("MLX not available")
 
     def solve_poisson_mlx(*args, **kwargs):
+        raise RuntimeError("MLX not available")
+
+    def compute_velocity_mlx(*args, **kwargs):
+        raise RuntimeError("MLX not available")
+
+    def compute_velocity_gradient_mlx(*args, **kwargs):
         raise RuntimeError("MLX not available")
 
     def to_mlx(arr):

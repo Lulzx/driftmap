@@ -38,7 +38,8 @@ def run_to_steady_state(config: dict,
                         particles_per_cell: int = 1,
                         reinit_threshold: float = 2.0,
                         max_reinit_steps: int = 200,
-                        use_gradient_p2g: bool = True) -> Simulation:
+                        use_gradient_p2g: bool = True,
+                        backend: str = "cpu") -> Simulation:
     """Run to a quasi-stationary state."""
     sim = Simulation(
         nx=config["nx"],
@@ -55,6 +56,7 @@ def run_to_steady_state(config: dict,
         reinit_threshold=reinit_threshold,
         max_reinit_steps=max_reinit_steps,
         use_gradient_p2g=use_gradient_p2g,
+        backend=backend,
     )
 
     rng = np.random.default_rng(seed)
@@ -130,6 +132,7 @@ def main():
     parser.add_argument("--no-gradient-p2g", action="store_true")
     parser.add_argument("--k-min", type=float, default=1.0)
     parser.add_argument("--k-max", type=float, default=10.0)
+    parser.add_argument("--backend", default="cpu", choices=["cpu", "mlx"])
     parser.add_argument("--fast", action="store_true", help="Use a lightweight config for quick checks")
     args = parser.parse_args()
 
@@ -157,6 +160,7 @@ def main():
             reinit_threshold=args.reinit_threshold,
             max_reinit_steps=args.max_reinit_steps,
             use_gradient_p2g=not args.no_gradient_p2g,
+            backend=args.backend,
         )
         k, E_k, F_k = collect_statistics(sim, config,
                                          n_samples=args.samples,

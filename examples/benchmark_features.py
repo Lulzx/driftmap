@@ -2,7 +2,7 @@
 """Comprehensive benchmark of VPFM features.
 
 Benchmarks:
-1. Standard VPFM vs Finite Difference (conservation, peak preservation)
+1. VPFM vs Finite Difference (upwind and Arakawa baselines)
 2. Flow map methods: standard vs dual-scale
 3. P2G methods: standard vs gradient-enhanced
 4. Time stepping: fixed vs adaptive
@@ -66,23 +66,42 @@ def benchmark_vpfm_vs_fd():
 
     # FD Upwind simulation
     print("Running FD Upwind simulation...")
-    fd_sim = FiniteDifferenceSimulation(nx, ny, Lx, Ly, dt=dt)
-    fd_sim.set_initial_condition(ic)
-    fd_initial_peak = np.abs(fd_sim.q).max()
-    fd_sim.run(n_steps, diag_interval=10, scheme='upwind', verbose=False)
+    fd_upwind = FiniteDifferenceSimulation(nx, ny, Lx, Ly, dt=dt)
+    fd_upwind.set_initial_condition(ic)
+    fd_upwind_initial_peak = np.abs(fd_upwind.q).max()
+    fd_upwind.run(n_steps, diag_interval=10, scheme='upwind', verbose=False)
 
-    fd_energies = np.array(fd_sim.history['energy'])
-    fd_enstrophies = np.array(fd_sim.history['enstrophy'])
-    fd_final_peak = np.abs(fd_sim.q).max()
+    fd_upwind_energies = np.array(fd_upwind.history['energy'])
+    fd_upwind_enstrophies = np.array(fd_upwind.history['enstrophy'])
+    fd_upwind_final_peak = np.abs(fd_upwind.q).max()
+
+    # FD Arakawa simulation (smaller dt for stability)
+    print("Running FD Arakawa simulation...")
+    # Arakawa needs smaller dt + mild viscosity for stability in this test
+    arakawa_dt = dt * 0.25
+    arakawa_nu = 1e-2
+    arakawa_steps = int(round(n_steps * dt / arakawa_dt))
+    fd_arakawa = FiniteDifferenceSimulation(nx, ny, Lx, Ly, dt=arakawa_dt, nu=arakawa_nu)
+    fd_arakawa.set_initial_condition(ic)
+    fd_arakawa_initial_peak = np.abs(fd_arakawa.q).max()
+    fd_arakawa.run(arakawa_steps, diag_interval=10, scheme='arakawa', verbose=False)
+
+    fd_arakawa_energies = np.array(fd_arakawa.history['energy'])
+    fd_arakawa_enstrophies = np.array(fd_arakawa.history['enstrophy'])
+    fd_arakawa_final_peak = np.abs(fd_arakawa.q).max()
 
     # Results
     vpfm_energy_error = abs(vpfm_energies[-1] - vpfm_energies[0]) / vpfm_energies[0] * 100
     vpfm_enstrophy_error = abs(vpfm_enstrophies[-1] - vpfm_enstrophies[0]) / vpfm_enstrophies[0] * 100
     vpfm_peak_ratio = vpfm_final_peak / vpfm_initial_peak * 100
 
-    fd_energy_error = abs(fd_energies[-1] - fd_energies[0]) / fd_energies[0] * 100
-    fd_enstrophy_error = abs(fd_enstrophies[-1] - fd_enstrophies[0]) / fd_enstrophies[0] * 100
-    fd_peak_ratio = fd_final_peak / fd_initial_peak * 100
+    fd_upwind_energy_error = abs(fd_upwind_energies[-1] - fd_upwind_energies[0]) / fd_upwind_energies[0] * 100
+    fd_upwind_enstrophy_error = abs(fd_upwind_enstrophies[-1] - fd_upwind_enstrophies[0]) / fd_upwind_enstrophies[0] * 100
+    fd_upwind_peak_ratio = fd_upwind_final_peak / fd_upwind_initial_peak * 100
+
+    fd_arakawa_energy_error = abs(fd_arakawa_energies[-1] - fd_arakawa_energies[0]) / fd_arakawa_energies[0] * 100
+    fd_arakawa_enstrophy_error = abs(fd_arakawa_enstrophies[-1] - fd_arakawa_enstrophies[0]) / fd_arakawa_enstrophies[0] * 100
+    fd_arakawa_peak_ratio = fd_arakawa_final_peak / fd_arakawa_initial_peak * 100
 
     results = {
         'vpfm': {
@@ -93,22 +112,37 @@ def benchmark_vpfm_vs_fd():
             'enstrophies': vpfm_enstrophies,
             'times': np.array(vpfm_sim.history['time']),
         },
-        'fd': {
-            'energy_error': fd_energy_error,
-            'enstrophy_error': fd_enstrophy_error,
-            'peak_preservation': fd_peak_ratio,
-            'energies': fd_energies,
-            'enstrophies': fd_enstrophies,
-            'times': np.array(fd_sim.history['time']),
+        'fd_upwind': {
+            'energy_error': fd_upwind_energy_error,
+            'enstrophy_error': fd_upwind_enstrophy_error,
+            'peak_preservation': fd_upwind_peak_ratio,
+            'energies': fd_upwind_energies,
+            'enstrophies': fd_upwind_enstrophies,
+            'times': np.array(fd_upwind.history['time']),
+        },
+        'fd_arakawa': {
+            'energy_error': fd_arakawa_energy_error,
+            'enstrophy_error': fd_arakawa_enstrophy_error,
+            'peak_preservation': fd_arakawa_peak_ratio,
+            'energies': fd_arakawa_energies,
+            'enstrophies': fd_arakawa_enstrophies,
+            'times': np.array(fd_arakawa.history['time']),
         }
     }
 
     print(f"\nResults (t={n_steps * dt:.1f}):")
-    print(f"  {'Metric':<25} {'VPFM':<15} {'FD Upwind':<15} {'VPFM Advantage'}")
+    print(f"  {'Metric':<25} {'VPFM':<12} {'FD Upwind':<12} {'FD Arakawa':<12}")
     print(f"  {'-'*70}")
-    print(f"  {'Peak preservation':<25} {vpfm_peak_ratio:.1f}%{'':<10} {fd_peak_ratio:.1f}%{'':<10} {vpfm_peak_ratio/fd_peak_ratio:.1f}x")
-    print(f"  {'Energy error':<25} {vpfm_energy_error:.2f}%{'':<10} {fd_energy_error:.2f}%{'':<10} {fd_energy_error/vpfm_energy_error:.1f}x")
-    print(f"  {'Enstrophy error':<25} {vpfm_enstrophy_error:.2f}%{'':<10} {fd_enstrophy_error:.2f}%{'':<10} {fd_enstrophy_error/vpfm_enstrophy_error:.1f}x")
+    print(f"  {'Peak preservation':<25} {vpfm_peak_ratio:>7.1f}%   {fd_upwind_peak_ratio:>7.1f}%   {fd_arakawa_peak_ratio:>7.1f}%")
+    print(f"  {'Energy error':<25} {vpfm_energy_error:>7.2f}%   {fd_upwind_energy_error:>7.2f}%   {fd_arakawa_energy_error:>7.2f}%")
+    print(f"  {'Enstrophy error':<25} {vpfm_enstrophy_error:>7.2f}%   {fd_upwind_enstrophy_error:>7.2f}%   {fd_arakawa_enstrophy_error:>7.2f}%")
+    print("\nVPFM advantage:")
+    print(f"  vs FD Upwind  -> Peak {vpfm_peak_ratio/fd_upwind_peak_ratio:.1f}x, "
+          f"Energy {fd_upwind_energy_error/vpfm_energy_error:.1f}x, "
+          f"Enstrophy {fd_upwind_enstrophy_error/vpfm_enstrophy_error:.1f}x")
+    print(f"  vs FD Arakawa -> Peak {vpfm_peak_ratio/fd_arakawa_peak_ratio:.1f}x, "
+          f"Energy {fd_arakawa_energy_error/vpfm_energy_error:.1f}x, "
+          f"Enstrophy {fd_arakawa_enstrophy_error/vpfm_enstrophy_error:.1f}x")
 
     return results
 
@@ -402,11 +436,14 @@ def generate_plots(results):
     # 1. VPFM vs FD comparison
     ax1 = fig.add_subplot(2, 3, 1)
     vpfm_data = results['vpfm_vs_fd']['vpfm']
-    fd_data = results['vpfm_vs_fd']['fd']
+    fd_upwind = results['vpfm_vs_fd']['fd_upwind']
+    fd_arakawa = results['vpfm_vs_fd']['fd_arakawa']
     ax1.plot(vpfm_data['times'], vpfm_data['energies'] / vpfm_data['energies'][0],
              'b-', linewidth=2, label='VPFM')
-    ax1.plot(fd_data['times'], fd_data['energies'] / fd_data['energies'][0],
+    ax1.plot(fd_upwind['times'], fd_upwind['energies'] / fd_upwind['energies'][0],
              'r--', linewidth=2, label='FD Upwind')
+    ax1.plot(fd_arakawa['times'], fd_arakawa['energies'] / fd_arakawa['energies'][0],
+             'm-.', linewidth=2, label='FD Arakawa')
     ax1.set_xlabel('Time')
     ax1.set_ylabel('E(t) / E(0)')
     ax1.set_title('Energy Conservation')
@@ -486,10 +523,13 @@ def generate_plots(results):
 
     # Peak preservation comparison
     ax = axes[0]
-    methods = ['VPFM', 'FD Upwind']
-    peaks = [results['vpfm_vs_fd']['vpfm']['peak_preservation'],
-             results['vpfm_vs_fd']['fd']['peak_preservation']]
-    colors = ['#2ecc71', '#e74c3c']
+    methods = ['VPFM', 'FD Upwind', 'FD Arakawa']
+    peaks = [
+        results['vpfm_vs_fd']['vpfm']['peak_preservation'],
+        results['vpfm_vs_fd']['fd_upwind']['peak_preservation'],
+        results['vpfm_vs_fd']['fd_arakawa']['peak_preservation'],
+    ]
+    colors = ['#2ecc71', '#e74c3c', '#9b59b6']
     bars = ax.bar(methods, peaks, color=colors, edgecolor='black', linewidth=1.5)
     ax.set_ylabel('Peak Preservation (%)')
     ax.set_title('Vortex Peak Preservation')
@@ -501,14 +541,23 @@ def generate_plots(results):
     # Conservation comparison
     ax = axes[1]
     metrics = ['Energy\nError', 'Enstrophy\nError']
-    vpfm_vals = [results['vpfm_vs_fd']['vpfm']['energy_error'],
-                 results['vpfm_vs_fd']['vpfm']['enstrophy_error']]
-    fd_vals = [results['vpfm_vs_fd']['fd']['energy_error'],
-               results['vpfm_vs_fd']['fd']['enstrophy_error']]
+    vpfm_vals = [
+        results['vpfm_vs_fd']['vpfm']['energy_error'],
+        results['vpfm_vs_fd']['vpfm']['enstrophy_error'],
+    ]
+    fd_upwind_vals = [
+        results['vpfm_vs_fd']['fd_upwind']['energy_error'],
+        results['vpfm_vs_fd']['fd_upwind']['enstrophy_error'],
+    ]
+    fd_arakawa_vals = [
+        results['vpfm_vs_fd']['fd_arakawa']['energy_error'],
+        results['vpfm_vs_fd']['fd_arakawa']['enstrophy_error'],
+    ]
     x = np.arange(len(metrics))
-    width = 0.35
-    bars1 = ax.bar(x - width/2, vpfm_vals, width, label='VPFM', color='#2ecc71', edgecolor='black')
-    bars2 = ax.bar(x + width/2, fd_vals, width, label='FD Upwind', color='#e74c3c', edgecolor='black')
+    width = 0.25
+    bars1 = ax.bar(x - width, vpfm_vals, width, label='VPFM', color='#2ecc71', edgecolor='black')
+    bars2 = ax.bar(x, fd_upwind_vals, width, label='FD Upwind', color='#e74c3c', edgecolor='black')
+    bars3 = ax.bar(x + width, fd_arakawa_vals, width, label='FD Arakawa', color='#9b59b6', edgecolor='black')
     ax.set_ylabel('Error (%)')
     ax.set_title('Conservation Errors')
     ax.set_xticks(x)
@@ -544,17 +593,26 @@ def print_summary_table(results):
     print("=" * 60)
 
     vpfm = results['vpfm_vs_fd']['vpfm']
-    fd = results['vpfm_vs_fd']['fd']
+    fd_upwind = results['vpfm_vs_fd']['fd_upwind']
+    fd_arakawa = results['vpfm_vs_fd']['fd_arakawa']
     std_fm = results['flow_maps']['standard']
     dual_fm = results['flow_maps']['dual_scale']
     std_p2g = results['gradient_p2g']['standard']
     grad_p2g = results['gradient_p2g']['gradient']
 
     print("""
-### Benchmark Results
+### Benchmark Results (VPFM vs FD Upwind)
 
 | Metric | VPFM | FD Upwind | VPFM Advantage |
 |--------|------|-----------|----------------|
+| Peak preservation | {:.1f}% | {:.1f}% | **{:.1f}x** |
+| Energy error | {:.2f}% | {:.2f}% | **{:.1f}x** |
+| Enstrophy error | {:.2f}% | {:.2f}% | **{:.1f}x** |
+
+### Benchmark Results (VPFM vs FD Arakawa)
+
+| Metric | VPFM | FD Arakawa | VPFM Advantage |
+|--------|------|------------|----------------|
 | Peak preservation | {:.1f}% | {:.1f}% | **{:.1f}x** |
 | Energy error | {:.2f}% | {:.2f}% | **{:.1f}x** |
 | Enstrophy error | {:.2f}% | {:.2f}% | **{:.1f}x** |
@@ -573,12 +631,18 @@ def print_summary_table(results):
 | Standard P2G | {:.1f}% |
 | Gradient-Enhanced P2G | {:.1f}% |
 """.format(
-        vpfm['peak_preservation'], fd['peak_preservation'],
-        vpfm['peak_preservation'] / fd['peak_preservation'],
-        vpfm['energy_error'], fd['energy_error'],
-        fd['energy_error'] / vpfm['energy_error'] if vpfm['energy_error'] > 0 else 1,
-        vpfm['enstrophy_error'], fd['enstrophy_error'],
-        fd['enstrophy_error'] / vpfm['enstrophy_error'] if vpfm['enstrophy_error'] > 0 else 1,
+        vpfm['peak_preservation'], fd_upwind['peak_preservation'],
+        vpfm['peak_preservation'] / fd_upwind['peak_preservation'],
+        vpfm['energy_error'], fd_upwind['energy_error'],
+        fd_upwind['energy_error'] / vpfm['energy_error'] if vpfm['energy_error'] > 0 else 1,
+        vpfm['enstrophy_error'], fd_upwind['enstrophy_error'],
+        fd_upwind['enstrophy_error'] / vpfm['enstrophy_error'] if vpfm['enstrophy_error'] > 0 else 1,
+        vpfm['peak_preservation'], fd_arakawa['peak_preservation'],
+        vpfm['peak_preservation'] / fd_arakawa['peak_preservation'],
+        vpfm['energy_error'], fd_arakawa['energy_error'],
+        fd_arakawa['energy_error'] / vpfm['energy_error'] if vpfm['energy_error'] > 0 else 1,
+        vpfm['enstrophy_error'], fd_arakawa['enstrophy_error'],
+        fd_arakawa['enstrophy_error'] / vpfm['enstrophy_error'] if vpfm['enstrophy_error'] > 0 else 1,
         std_fm['avg_error'], std_fm['max_error'], std_fm['reinits'],
         dual_fm['avg_error'], dual_fm['max_error'],
         dual_fm['short_reinits'], dual_fm['long_reinits'],

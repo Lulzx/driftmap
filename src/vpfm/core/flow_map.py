@@ -12,7 +12,7 @@ Reference: Wang et al. (2025) "Fluid Simulation on Vortex Particle Flow Maps"
 """
 
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from dataclasses import dataclass
 from numba import njit, prange
 
@@ -248,17 +248,52 @@ class FlowMapIntegrator:
     """Advanced flow map integrator with RK4 and Hessian tracking."""
 
     def __init__(self, grid: Grid, kernel_order: str = 'quadratic',
-                 track_hessian: bool = True):
+                 track_hessian: bool = True, backend: str = "cpu",
+                 mlx_ops: Optional[Dict[str, object]] = None):
         """Initialize integrator.
 
         Args:
             grid: Computational grid
             kernel_order: 'linear', 'quadratic', or 'cubic'
             track_hessian: Whether to track Hessian for gradient accuracy
+            backend: 'cpu' or 'mlx'
+            mlx_ops: Optional MLX ops dict for GPU acceleration
         """
         self.grid = grid
         self.kernel = InterpolationKernel(kernel_order)
         self.track_hessian = track_hessian
+        self.backend = backend
+
+        self._use_mlx = False
+        self._mlx_ops = None
+        if backend == "mlx":
+            if mlx_ops is None:
+                from ..backends.kernels_mlx import (
+                    check_mlx_available,
+                    G2P_mlx,
+                    G2P_mlx_with_gradient,
+                    jacobian_rhs_mlx,
+                    rk4_positions_mlx,
+                    to_mlx,
+                    to_numpy,
+                    synchronize,
+                )
+                if not check_mlx_available():
+                    raise RuntimeError("MLX backend requested but MLX is not available")
+                self._mlx_ops = {
+                    "G2P": G2P_mlx,
+                    "G2P_with_gradient": G2P_mlx_with_gradient,
+                    "jacobian_rhs": jacobian_rhs_mlx,
+                    "rk4_positions": rk4_positions_mlx,
+                    "to_mlx": to_mlx,
+                    "to_numpy": to_numpy,
+                    "sync": synchronize,
+                }
+            else:
+                self._mlx_ops = mlx_ops
+            self._use_mlx = True
+        elif backend != "cpu":
+            raise ValueError(f"Unsupported backend '{backend}'. Use 'cpu' or 'mlx'.")
 
         # Preallocate arrays for velocity gradient
         self._grad_v = None
@@ -288,6 +323,23 @@ class FlowMapIntegrator:
                          self.grid.dx, self.grid.dy, self.kernel)
         return vx, vy
 
+    def _mlx_enabled(self) -> bool:
+        """Check if MLX is active and compatible with current kernel."""
+        return self._use_mlx and self.kernel.order == "quadratic" and self._mlx_ops is not None
+
+    def _interpolate_velocity_mlx(self, px, py):
+        """Interpolate velocity to particle positions using MLX."""
+        ops = self._mlx_ops
+        vx = ops["G2P"](
+            ops["to_mlx"](np.asarray(self.grid.vx, dtype=np.float32)),
+            px, py, self.grid.dx, self.grid.dy
+        )
+        vy = ops["G2P"](
+            ops["to_mlx"](np.asarray(self.grid.vy, dtype=np.float32)),
+            px, py, self.grid.dx, self.grid.dy
+        )
+        return vx, vy
+
     def _interpolate_velocity_gradient(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
         """Interpolate velocity gradient tensor to particles.
 
@@ -308,8 +360,44 @@ class FlowMapIntegrator:
                                              self.grid.dx, self.grid.dy, self.kernel)
         return self._grad_v
 
+    def _interpolate_velocity_gradient_mlx(self, px, py):
+        """Interpolate velocity gradient tensor to particles using MLX."""
+        import mlx.core as mx
+        ops = self._mlx_ops
+        dvx_dx = ops["G2P"](
+            ops["to_mlx"](np.asarray(self.grid.dvx_dx, dtype=np.float32)),
+            px, py, self.grid.dx, self.grid.dy
+        )
+        dvx_dy = ops["G2P"](
+            ops["to_mlx"](np.asarray(self.grid.dvx_dy, dtype=np.float32)),
+            px, py, self.grid.dx, self.grid.dy
+        )
+        dvy_dx = ops["G2P"](
+            ops["to_mlx"](np.asarray(self.grid.dvy_dx, dtype=np.float32)),
+            px, py, self.grid.dx, self.grid.dy
+        )
+        dvy_dy = ops["G2P"](
+            ops["to_mlx"](np.asarray(self.grid.dvy_dy, dtype=np.float32)),
+            px, py, self.grid.dx, self.grid.dy
+        )
+        grad_v = mx.stack((dvx_dx, dvx_dy, dvy_dx, dvy_dy), axis=-1)
+        return grad_v.reshape(-1, 2, 2)
+
+    def _midpoint_positions_mlx(self, x0, y0, vx, vy, dt):
+        """Compute midpoint positions using MLX with periodic wrap."""
+        import mlx.core as mx
+        x_mid = x0 + dt * vx
+        y_mid = y0 + dt * vy
+        x_mid = x_mid - self.grid.Lx * mx.floor(x_mid / self.grid.Lx)
+        y_mid = y_mid - self.grid.Ly * mx.floor(y_mid / self.grid.Ly)
+        return x_mid, y_mid
+
     def advect_particles_rk4(self, particles: ParticleSystem, dt: float):
         """Advect particles using RK4."""
+        if self._mlx_enabled():
+            self._advect_particles_rk4_mlx(particles, dt)
+            return
+
         x0 = np.ascontiguousarray(particles.x)
         y0 = np.ascontiguousarray(particles.y)
         Lx, Ly = self.grid.Lx, self.grid.Ly
@@ -333,12 +421,46 @@ class FlowMapIntegrator:
         particles.x, particles.y = _rk4_positions(
             x0, y0, vx1, vy1, vx2, vy2, vx3, vy3, vx4, vy4, dt, Lx, Ly)
 
+    def _advect_particles_rk4_mlx(self, particles: ParticleSystem, dt: float):
+        """Advect particles using MLX RK4."""
+        ops = self._mlx_ops
+
+        x0 = ops["to_mlx"](np.asarray(particles.x, dtype=np.float32))
+        y0 = ops["to_mlx"](np.asarray(particles.y, dtype=np.float32))
+
+        # k1
+        vx1, vy1 = self._interpolate_velocity_mlx(x0, y0)
+
+        # k2
+        x_mid, y_mid = self._midpoint_positions_mlx(x0, y0, vx1, vy1, 0.5 * dt)
+        vx2, vy2 = self._interpolate_velocity_mlx(x_mid, y_mid)
+
+        # k3
+        x_mid, y_mid = self._midpoint_positions_mlx(x0, y0, vx2, vy2, 0.5 * dt)
+        vx3, vy3 = self._interpolate_velocity_mlx(x_mid, y_mid)
+
+        # k4
+        x_mid, y_mid = self._midpoint_positions_mlx(x0, y0, vx3, vy3, dt)
+        vx4, vy4 = self._interpolate_velocity_mlx(x_mid, y_mid)
+
+        x_new, y_new = ops["rk4_positions"](
+            x0, y0, vx1, vy1, vx2, vy2, vx3, vy3, vx4, vy4, dt, self.grid.Lx, self.grid.Ly
+        )
+
+        particles.x = ops["to_numpy"](x_new)
+        particles.y = ops["to_numpy"](y_new)
+        ops["sync"]()
+
     def evolve_jacobian_rk4(self, particles: ParticleSystem,
                             flow_map: FlowMapState, dt: float):
         """Evolve Jacobian using RK4.
 
         dJ/dt = -J · ∇v
         """
+        if self._mlx_enabled():
+            self._evolve_jacobian_rk4_mlx(particles, flow_map, dt)
+            return
+
         J = flow_map.J
         Lx, Ly = self.grid.Lx, self.grid.Ly
 
@@ -378,6 +500,44 @@ class FlowMapIntegrator:
         # Update Jacobian
         flow_map.J = _rk4_jacobian_update(J, k1, k2, k3, k4, dt)
 
+    def _evolve_jacobian_rk4_mlx(self, particles: ParticleSystem,
+                                 flow_map: FlowMapState, dt: float):
+        """Evolve Jacobian using MLX RK4."""
+        ops = self._mlx_ops
+
+        J = ops["to_mlx"](np.asarray(flow_map.J, dtype=np.float32))
+        x0 = ops["to_mlx"](np.asarray(particles.x, dtype=np.float32))
+        y0 = ops["to_mlx"](np.asarray(particles.y, dtype=np.float32))
+
+        # k1
+        vx1, vy1 = self._interpolate_velocity_mlx(x0, y0)
+        grad_v1 = self._interpolate_velocity_gradient_mlx(x0, y0)
+        k1 = ops["jacobian_rhs"](J, grad_v1)
+
+        # k2
+        x_mid, y_mid = self._midpoint_positions_mlx(x0, y0, vx1, vy1, 0.5 * dt)
+        grad_v2 = self._interpolate_velocity_gradient_mlx(x_mid, y_mid)
+        J_mid = J + 0.5 * dt * k1
+        k2 = ops["jacobian_rhs"](J_mid, grad_v2)
+
+        # k3
+        vx2, vy2 = self._interpolate_velocity_mlx(x_mid, y_mid)
+        x_mid2, y_mid2 = self._midpoint_positions_mlx(x0, y0, vx2, vy2, 0.5 * dt)
+        grad_v3 = self._interpolate_velocity_gradient_mlx(x_mid2, y_mid2)
+        J_mid = J + 0.5 * dt * k2
+        k3 = ops["jacobian_rhs"](J_mid, grad_v3)
+
+        # k4
+        vx3, vy3 = self._interpolate_velocity_mlx(x_mid2, y_mid2)
+        x_end, y_end = self._midpoint_positions_mlx(x0, y0, vx3, vy3, dt)
+        grad_v4 = self._interpolate_velocity_gradient_mlx(x_end, y_end)
+        J_mid = J + dt * k3
+        k4 = ops["jacobian_rhs"](J_mid, grad_v4)
+
+        J_new = J + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        flow_map.J = ops["to_numpy"](J_new)
+        ops["sync"]()
+
     def evolve_hessian(self, particles: ParticleSystem,
                        flow_map: FlowMapState, dt: float):
         """Evolve Hessian using Euler (for simplicity).
@@ -386,6 +546,9 @@ class FlowMapIntegrator:
                    - J_il (∂²v_l/∂x_j∂x_k)
         """
         if flow_map.H is None:
+            return
+        if self._mlx_enabled():
+            self._evolve_hessian_mlx(particles, flow_map, dt)
             return
 
         n = particles.n_particles
@@ -420,6 +583,41 @@ class FlowMapIntegrator:
         dH = self._compute_hessian_rhs(H, J, grad_v, d2v)
         flow_map.H = H + dt * dH
 
+    def _evolve_hessian_mlx(self, particles: ParticleSystem,
+                            flow_map: FlowMapState, dt: float):
+        """Evolve Hessian using MLX (Euler update)."""
+        import mlx.core as mx
+        ops = self._mlx_ops
+
+        H = ops["to_mlx"](np.asarray(flow_map.H, dtype=np.float32))
+        J = ops["to_mlx"](np.asarray(flow_map.J, dtype=np.float32))
+        px = ops["to_mlx"](np.asarray(particles.x, dtype=np.float32))
+        py = ops["to_mlx"](np.asarray(particles.y, dtype=np.float32))
+
+        grad_v = self._interpolate_velocity_gradient_mlx(px, py)
+        hess_v = self._compute_velocity_hessian_mlx()
+
+        d2vx_dxdx = ops["G2P"](hess_v["d2vx_dxdx"], px, py, self.grid.dx, self.grid.dy)
+        d2vx_dxdy = ops["G2P"](hess_v["d2vx_dxdy"], px, py, self.grid.dx, self.grid.dy)
+        d2vx_dydy = ops["G2P"](hess_v["d2vx_dydy"], px, py, self.grid.dx, self.grid.dy)
+        d2vy_dxdx = ops["G2P"](hess_v["d2vy_dxdx"], px, py, self.grid.dx, self.grid.dy)
+        d2vy_dxdy = ops["G2P"](hess_v["d2vy_dxdy"], px, py, self.grid.dx, self.grid.dy)
+        d2vy_dydy = ops["G2P"](hess_v["d2vy_dydy"], px, py, self.grid.dx, self.grid.dy)
+
+        d2v_x = mx.stack([
+            mx.stack([d2vx_dxdx, d2vx_dxdy], axis=1),
+            mx.stack([d2vx_dxdy, d2vx_dydy], axis=1),
+        ], axis=1)
+        d2v_y = mx.stack([
+            mx.stack([d2vy_dxdx, d2vy_dxdy], axis=1),
+            mx.stack([d2vy_dxdy, d2vy_dydy], axis=1),
+        ], axis=1)
+        d2v = mx.stack([d2v_x, d2v_y], axis=1)
+
+        dH = self._compute_hessian_rhs_mlx(H, J, grad_v, d2v)
+        flow_map.H = ops["to_numpy"](H + dt * dH)
+        ops["sync"]()
+
     def _compute_velocity_hessian(self) -> dict:
         """Compute second derivatives of velocity on grid."""
         from numpy.fft import fft2, ifft2, fftfreq
@@ -448,12 +646,48 @@ class FlowMapIntegrator:
             'd2vy_dxdx': d2vy_dxdx, 'd2vy_dxdy': d2vy_dxdy, 'd2vy_dydy': d2vy_dydy,
         }
 
+    def _compute_velocity_hessian_mlx(self) -> dict:
+        """Compute second derivatives of velocity on grid using MLX FFTs."""
+        import mlx.core as mx
+        nx, ny = self.grid.nx, self.grid.ny
+        dx, dy = self.grid.dx, self.grid.dy
+
+        kx = np.fft.fftfreq(nx, dx) * 2 * np.pi
+        ky = np.fft.fftfreq(ny, dy) * 2 * np.pi
+        KX, KY = mx.meshgrid(
+            self._mlx_ops["to_mlx"](np.asarray(kx, dtype=np.float32)),
+            self._mlx_ops["to_mlx"](np.asarray(ky, dtype=np.float32)),
+            indexing='ij'
+        )
+
+        vx = self._mlx_ops["to_mlx"](np.asarray(self.grid.vx, dtype=np.float32))
+        vy = self._mlx_ops["to_mlx"](np.asarray(self.grid.vy, dtype=np.float32))
+
+        vx_hat = mx.fft.fft2(vx)
+        vy_hat = mx.fft.fft2(vy)
+
+        d2vx_dxdx = mx.real(mx.fft.ifft2(-KX**2 * vx_hat))
+        d2vx_dxdy = mx.real(mx.fft.ifft2(-KX * KY * vx_hat))
+        d2vx_dydy = mx.real(mx.fft.ifft2(-KY**2 * vx_hat))
+
+        d2vy_dxdx = mx.real(mx.fft.ifft2(-KX**2 * vy_hat))
+        d2vy_dxdy = mx.real(mx.fft.ifft2(-KX * KY * vy_hat))
+        d2vy_dydy = mx.real(mx.fft.ifft2(-KY**2 * vy_hat))
+
+        return {
+            'd2vx_dxdx': d2vx_dxdx, 'd2vx_dxdy': d2vx_dxdy, 'd2vx_dydy': d2vx_dydy,
+            'd2vy_dxdx': d2vy_dxdx, 'd2vy_dxdy': d2vy_dxdy, 'd2vy_dydy': d2vy_dydy,
+        }
+
     def evolve_particle_gradients_rk4(self, particles: ParticleSystem, dt: float):
         """Evolve particle vorticity gradients for a materially conserved scalar.
 
         Uses: D(grad q)/Dt = -(grad v)^T grad q
         """
         if not hasattr(particles, "grad_q_x"):
+            return
+        if self._mlx_enabled():
+            self._evolve_particle_gradients_rk4_mlx(particles, dt)
             return
 
         g0 = np.stack((particles.grad_q_x, particles.grad_q_y), axis=1)
@@ -490,6 +724,49 @@ class FlowMapIntegrator:
         particles.grad_q_x = g_new[:, 0]
         particles.grad_q_y = g_new[:, 1]
 
+    def _evolve_particle_gradients_rk4_mlx(self, particles: ParticleSystem, dt: float):
+        """Evolve particle gradients using MLX RK4."""
+        import mlx.core as mx
+        ops = self._mlx_ops
+
+        g0 = ops["to_mlx"](np.stack((
+            np.asarray(particles.grad_q_x, dtype=np.float32),
+            np.asarray(particles.grad_q_y, dtype=np.float32)
+        ), axis=1))
+        x0 = ops["to_mlx"](np.asarray(particles.x, dtype=np.float32))
+        y0 = ops["to_mlx"](np.asarray(particles.y, dtype=np.float32))
+
+        # k1
+        vx1, vy1 = self._interpolate_velocity_mlx(x0, y0)
+        grad_v1 = self._interpolate_velocity_gradient_mlx(x0, y0)
+        k1 = -mx.einsum('pji,pj->pi', grad_v1, g0)
+
+        # k2
+        x_mid, y_mid = self._midpoint_positions_mlx(x0, y0, vx1, vy1, 0.5 * dt)
+        g_mid = g0 + 0.5 * dt * k1
+        grad_v2 = self._interpolate_velocity_gradient_mlx(x_mid, y_mid)
+        k2 = -mx.einsum('pji,pj->pi', grad_v2, g_mid)
+
+        # k3
+        vx2, vy2 = self._interpolate_velocity_mlx(x_mid, y_mid)
+        x_mid2, y_mid2 = self._midpoint_positions_mlx(x0, y0, vx2, vy2, 0.5 * dt)
+        g_mid2 = g0 + 0.5 * dt * k2
+        grad_v3 = self._interpolate_velocity_gradient_mlx(x_mid2, y_mid2)
+        k3 = -mx.einsum('pji,pj->pi', grad_v3, g_mid2)
+
+        # k4
+        vx3, vy3 = self._interpolate_velocity_mlx(x_mid2, y_mid2)
+        x_end, y_end = self._midpoint_positions_mlx(x0, y0, vx3, vy3, dt)
+        g_end = g0 + dt * k3
+        grad_v4 = self._interpolate_velocity_gradient_mlx(x_end, y_end)
+        k4 = -mx.einsum('pji,pj->pi', grad_v4, g_end)
+
+        g_new = g0 + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        g_new_np = ops["to_numpy"](g_new)
+        particles.grad_q_x = g_new_np[:, 0]
+        particles.grad_q_y = g_new_np[:, 1]
+        ops["sync"]()
+
     @staticmethod
     def _compute_hessian_rhs(H, J, grad_v, d2v):
         """Compute dH/dt for the backward flow map Hessian."""
@@ -508,6 +785,15 @@ class FlowMapIntegrator:
                         dH[p, i, j, k] = -term
 
         return dH
+
+    @staticmethod
+    def _compute_hessian_rhs_mlx(H, J, grad_v, d2v):
+        """Compute dH/dt for the backward flow map Hessian using MLX."""
+        import mlx.core as mx
+        term1 = mx.einsum('pijl,plk->pijk', H, grad_v)
+        term2 = mx.einsum('pilk,plj->pijk', H, grad_v)
+        term3 = mx.einsum('pil,pljk->pijk', J, d2v)
+        return -(term1 + term2 + term3)
 
     def step(self, particles: ParticleSystem, flow_map: FlowMapState, dt: float,
              update_gradients: bool = False):
@@ -595,7 +881,9 @@ class DualScaleFlowMapIntegrator:
                  n_L: int = 100,  # Long map reinit interval
                  n_S: int = 20,   # Short map reinit interval
                  error_threshold_long: float = 3.0,
-                 error_threshold_short: float = 1.0):
+                 error_threshold_short: float = 1.0,
+                 backend: str = "cpu",
+                 mlx_ops: Optional[Dict[str, object]] = None):
         """Initialize dual-scale integrator.
 
         Args:
@@ -606,6 +894,8 @@ class DualScaleFlowMapIntegrator:
             n_S: Maximum steps between short map reinitializations
             error_threshold_long: Error threshold for long map reinit
             error_threshold_short: Error threshold for short map reinit
+            backend: 'cpu' or 'mlx'
+            mlx_ops: Optional MLX ops dict for GPU acceleration
         """
         self.grid = grid
         self.kernel = InterpolationKernel(kernel_order)
@@ -617,7 +907,13 @@ class DualScaleFlowMapIntegrator:
         self.error_threshold_short = error_threshold_short
 
         # Internal single-scale integrator for actual evolution
-        self._integrator = FlowMapIntegrator(grid, kernel_order, track_hessian)
+        self._integrator = FlowMapIntegrator(
+            grid,
+            kernel_order,
+            track_hessian,
+            backend=backend,
+            mlx_ops=mlx_ops,
+        )
 
         # Preallocate arrays
         self._grad_v = None
@@ -680,6 +976,10 @@ class DualScaleFlowMapIntegrator:
         # Update step counters
         flow_map.steps_since_short_reinit += 1
         flow_map.steps_since_long_reinit += 1
+
+    def evolve_particle_gradients_rk4(self, particles: ParticleSystem, dt: float):
+        """Evolve particle gradients using the internal single-scale integrator."""
+        self._integrator.evolve_particle_gradients_rk4(particles, dt)
 
     def estimate_short_error(self, flow_map: DualScaleFlowMapState) -> float:
         """Estimate short flow map error."""

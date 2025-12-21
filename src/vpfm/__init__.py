@@ -47,7 +47,9 @@ from .backends.kernels_gpu import (
 from .backends.kernels_mlx import (
     check_mlx_available,
     P2G_mlx,
+    P2G_mlx_gradient_enhanced,
     G2P_mlx,
+    G2P_mlx_with_gradient,
     jacobian_rhs_mlx,
     rk4_positions_mlx,
     solve_poisson_mlx,
@@ -128,7 +130,9 @@ __all__ = [
     # GPU kernels - MLX (Apple Silicon)
     "check_mlx_available",
     "P2G_mlx",
+    "P2G_mlx_gradient_enhanced",
     "G2P_mlx",
+    "G2P_mlx_with_gradient",
     "jacobian_rhs_mlx",
     "rk4_positions_mlx",
     "solve_poisson_mlx",
