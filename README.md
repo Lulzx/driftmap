@@ -5,6 +5,10 @@
 Driftmap adapts [Vortex Particle Flow Maps](https://arxiv.org/abs/2505.21946) to simulate plasma turbulence in the scrape-off layer (SOL) of tokamak fusion reactors.
 The Python package name is `vpfm` to keep the VPFM terminology intact.
 
+Plasma edge turbulence in fusion reactors is dominated by coherent vortex "blobs" that carry heat and particles into reactor walls. Standard grid-based solvers smear these structures due to numerical diffusion, obscuring transport physics. This project applies Vortex Particle Flow Maps, originally developed for smoke simulation in computer graphics, to plasma drift-wave turbulence. 
+
+The connection is exact in the reduced model: plasma potential vorticity obeys the same material conservation law as 2D incompressible fluid vorticity. By advecting vorticity on Lagrangian particles and reconstructing velocity on a grid, Driftmap preserves coherent structures while matching the accuracy of established finite-difference baselines.
+
 ## Overview
 
 A Lagrangian vortex method for 2D drift-wave turbulence, adapting VPFM to plasma physics:
