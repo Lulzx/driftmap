@@ -6,7 +6,7 @@ Provides a unified interface for array operations that can run on:
 - GPU (Apple Silicon): MLX with Metal acceleration
 
 Usage:
-    from vpfm.backend import get_backend, set_backend
+    from vpfm.backends.backend import get_backend, set_backend
 
     # Auto-detect best backend (MLX on Apple Silicon, CuPy on NVIDIA, else CPU)
     xp = get_backend()

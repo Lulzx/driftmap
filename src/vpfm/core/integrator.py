@@ -142,7 +142,7 @@ def compute_cfl_dt(grid: Grid, cfl: float = 0.5) -> float:
     Returns:
         Maximum stable time step
     """
-    from .velocity import max_velocity
+    from ..numerics.velocity import max_velocity
 
     v_max = max_velocity(grid)
     if v_max < 1e-10:

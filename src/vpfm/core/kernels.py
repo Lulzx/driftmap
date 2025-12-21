@@ -138,7 +138,7 @@ def cubic_bspline_derivative_1d(x: np.ndarray) -> np.ndarray:
 # Numba-optimized P2G transfers
 # =============================================================================
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def _p2g_quadratic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
                           nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
     """Numba-optimized P2G with quadratic B-spline kernel.
@@ -152,7 +152,7 @@ def _p2g_quadratic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
     inv_dx = 1.0 / dx
     inv_dy = 1.0 / dy
 
-    for p in prange(n_particles):
+    for p in range(n_particles):
         x_norm = px[p] * inv_dx
         y_norm = py[p] * inv_dy
 
@@ -178,14 +178,13 @@ def _p2g_quadratic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
                 gj = (base_j + dj) % ny
 
                 w = wx * wy
-                # Atomic add (handled by numba for parallel)
                 q_grid[gi, gj] += w * q_p
                 weight_grid[gi, gj] += w
 
     return q_grid, weight_grid
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def _p2g_gradient_enhanced_quadratic_numba(
     px: np.ndarray, py: np.ndarray, pq: np.ndarray,
     grad_q_x: np.ndarray, grad_q_y: np.ndarray,
@@ -206,7 +205,7 @@ def _p2g_gradient_enhanced_quadratic_numba(
     inv_dx = 1.0 / dx
     inv_dy = 1.0 / dy
 
-    for p in prange(n_particles):
+    for p in range(n_particles):
         x_norm = px[p] * inv_dx
         y_norm = py[p] * inv_dy
 
@@ -249,7 +248,7 @@ def _p2g_gradient_enhanced_quadratic_numba(
     return q_grid, weight_grid
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def _p2g_linear_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
                        nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
     """Numba-optimized P2G with linear kernel."""
@@ -260,7 +259,7 @@ def _p2g_linear_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
     inv_dx = 1.0 / dx
     inv_dy = 1.0 / dy
 
-    for p in prange(n_particles):
+    for p in range(n_particles):
         x_norm = px[p] * inv_dx
         y_norm = py[p] * inv_dy
 
@@ -289,7 +288,7 @@ def _p2g_linear_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
     return q_grid, weight_grid
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def _p2g_cubic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
                       nx: int, ny: int, dx: float, dy: float) -> Tuple[np.ndarray, np.ndarray]:
     """Numba-optimized P2G with cubic B-spline kernel."""
@@ -300,7 +299,7 @@ def _p2g_cubic_numba(px: np.ndarray, py: np.ndarray, pq: np.ndarray,
     inv_dx = 1.0 / dx
     inv_dy = 1.0 / dy
 
-    for p in prange(n_particles):
+    for p in range(n_particles):
         x_norm = px[p] * inv_dx
         y_norm = py[p] * inv_dy
 

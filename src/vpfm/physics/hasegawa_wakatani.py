@@ -23,13 +23,13 @@ import numpy as np
 from numpy.fft import fft2, ifft2, fftfreq
 from typing import Optional, Callable
 
-from .grid import Grid
-from .particles import ParticleSystem
-from .transfers import P2G_vectorized, G2P
-from .poisson import solve_poisson_hm
-from .velocity import compute_velocity, compute_velocity_gradient
-from .integrator import RK4Integrator
-from .diagnostics import compute_diagnostics
+from ..core.grid import Grid
+from ..core.particles import ParticleSystem
+from ..core.transfers import P2G_vectorized, G2P
+from ..numerics.poisson import solve_poisson_hm
+from ..numerics.velocity import compute_velocity, compute_velocity_gradient
+from ..core.integrator import RK4Integrator
+from ..diagnostics.diagnostics import compute_diagnostics
 
 
 class DensityParticles:
@@ -84,6 +84,7 @@ class HWSimulation:
                  alpha: float = 1.0,      # Adiabaticity
                  kappa: float = 0.05,     # Curvature drive
                  mu: float = 1e-4,        # Hyperviscosity
+                 nu: float = 0.0,         # Viscosity (Laplacian)
                  D: float = 1e-4,         # Density diffusion
                  nu_sheath: float = 0.0,  # Sheath damping
                  particles_per_cell: int = 1):
@@ -96,6 +97,7 @@ class HWSimulation:
             alpha: Adiabaticity parameter (α → ∞ is HM limit)
             kappa: Background density gradient / curvature drive
             mu: Hyperviscosity coefficient
+            nu: Viscosity coefficient
             D: Density diffusivity
             nu_sheath: Sheath damping rate for parallel losses
             particles_per_cell: Particle density
@@ -109,6 +111,7 @@ class HWSimulation:
         self.alpha = alpha
         self.kappa = kappa
         self.mu = mu
+        self.nu = nu
         self.D = D
         self.nu_sheath = nu_sheath
 
@@ -261,6 +264,7 @@ class HWSimulation:
 
         # Add dissipation terms
         S_zeta += self._apply_hyperviscosity(self.grid.q, self.mu)
+        S_zeta += self._apply_diffusion(self.grid.q, self.nu)
         S_zeta += self._apply_sheath_damping(self.grid.q)
 
         S_n += curvature

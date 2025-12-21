@@ -1,40 +1,41 @@
 """VPFM-Plasma: Vortex Particle Flow Maps for Plasma Turbulence Simulation"""
 
-from .grid import Grid
-from .particles import ParticleSystem
-from .transfers import P2G, G2P
-from .poisson import solve_poisson_hm
-from .velocity import compute_velocity, compute_velocity_gradient
-from .integrator import RK4Integrator
-from .diagnostics import compute_diagnostics
-from .simulation import (
-    Simulation,
-    SimulationV2,  # Backward compatibility alias
+from .core.grid import Grid
+from .core.particles import ParticleSystem
+from .core.transfers import P2G, G2P
+from .numerics.poisson import solve_poisson_hm
+from .numerics.velocity import compute_velocity, compute_velocity_gradient
+from .core.integrator import RK4Integrator
+from .diagnostics.diagnostics import compute_diagnostics
+from .diagnostics.spectral import energy_spectrum, density_flux_spectrum, fit_power_law
+from .diagnostics.flow_topology import compute_weiss_field, partition_flow, compute_residence_times
+from .physics.simulation import Simulation, SimulationV2  # Backward compatibility alias
+from .physics.initial_conditions import (
     lamb_oseen,
     vortex_pair,
     kelvin_helmholtz,
     random_turbulence,
 )
-from .hasegawa_wakatani import HWSimulation, DensityParticles
-from .arakawa import arakawa_jacobian, compute_poisson_bracket
-from .flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
-from .kernels import (
+from .physics.hasegawa_wakatani import HWSimulation, DensityParticles
+from .physics.arakawa import arakawa_jacobian, compute_poisson_bracket
+from .diagnostics.flux_diagnostics import VirtualProbe, BlobDetector, FluxStatistics
+from .core.kernels import (
     InterpolationKernel, P2G_bspline, G2P_bspline,
     P2G_bspline_gradient_enhanced, G2P_bspline_with_gradient
 )
-from .flow_map import (
+from .core.flow_map import (
     FlowMapIntegrator, FlowMapState,
     DualScaleFlowMapIntegrator, DualScaleFlowMapState,
 )
 
 # Backend abstraction (CPU/GPU)
-from .backend import (
+from .backends.backend import (
     get_backend, set_backend, get_backend_name,
     to_cpu, to_gpu, is_gpu_backend, synchronize,
 )
 
 # GPU kernels - CUDA (optional, requires CuPy)
-from .kernels_gpu import (
+from .backends.kernels_gpu import (
     check_gpu_available as check_cuda_available,
     P2G_gpu,
     G2P_gpu,
@@ -43,7 +44,7 @@ from .kernels_gpu import (
 )
 
 # GPU kernels - MLX (optional, requires MLX on Apple Silicon)
-from .kernels_mlx import (
+from .backends.kernels_mlx import (
     check_mlx_available,
     P2G_mlx,
     G2P_mlx,
@@ -55,7 +56,7 @@ from .kernels_mlx import (
 )
 
 # 3D extension
-from .simulation3d import (
+from .physics.simulation3d import (
     Simulation3D,
     Grid3D,
     Particles3D,
@@ -76,6 +77,12 @@ __all__ = [
     "compute_velocity_gradient",
     "RK4Integrator",
     "compute_diagnostics",
+    "energy_spectrum",
+    "density_flux_spectrum",
+    "fit_power_law",
+    "compute_weiss_field",
+    "partition_flow",
+    "compute_residence_times",
     # Simulation (unified HM + HW)
     "Simulation",
     "SimulationV2",  # Backward compatibility alias

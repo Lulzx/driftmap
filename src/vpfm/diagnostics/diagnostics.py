@@ -5,7 +5,7 @@ Computes conserved quantities and structure metrics.
 
 import numpy as np
 from numpy.fft import fft2, fftfreq
-from .grid import Grid
+from ..core.grid import Grid
 
 
 def compute_diagnostics(grid: Grid) -> dict:
@@ -26,7 +26,7 @@ def compute_diagnostics(grid: Grid) -> dict:
     dA = dx * dy
 
     # Energy: E = 0.5 * integral(|nabla(phi)|^2)
-    # Use spectral derivatives for accuracy
+    # Use central differences for efficiency
     dphi_dx = (np.roll(grid.phi, -1, axis=0) - np.roll(grid.phi, 1, axis=0)) / (2 * dx)
     dphi_dy = (np.roll(grid.phi, -1, axis=1) - np.roll(grid.phi, 1, axis=1)) / (2 * dy)
     energy = 0.5 * np.sum(dphi_dx**2 + dphi_dy**2) * dA

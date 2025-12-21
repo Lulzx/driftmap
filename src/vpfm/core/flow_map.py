@@ -24,7 +24,7 @@ from .kernels import InterpolationKernel, G2P_bspline, G2P_bspline_with_gradient
 @dataclass
 class FlowMapState:
     """State of the flow map for a particle system."""
-    # Jacobian J = ∇F (deformation gradient)
+    # Jacobian J = ∇ψ (backward flow map)
     J: np.ndarray  # (n_particles, 2, 2)
 
     # Hessian H = ∇²F (for gradient accuracy)
@@ -175,13 +175,13 @@ def _rk4_jacobian_update(J: np.ndarray, k1: np.ndarray, k2: np.ndarray,
     return J_new
 
 
-@njit(parallel=True, cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def _estimate_jacobian_error(J: np.ndarray) -> float:
     """Compute max ||J - I|| across all particles."""
     n = J.shape[0]
     max_err = 0.0
 
-    for p in prange(n):
+    for p in range(n):
         # Deviation from identity
         d00 = J[p, 0, 0] - 1.0
         d01 = J[p, 0, 1]
@@ -382,7 +382,8 @@ class FlowMapIntegrator:
                        flow_map: FlowMapState, dt: float):
         """Evolve Hessian using Euler (for simplicity).
 
-        dH_ijk/dt = -H_ljk (∂v_i/∂x_l) - J_lj (∂²v_i/∂x_l∂x_k) - J_lk (∂²v_i/∂x_l∂x_j)
+        dH_ijk/dt = -H_ijl (∂v_l/∂x_k) - H_ilk (∂v_l/∂x_j)
+                   - J_il (∂²v_l/∂x_j∂x_k)
         """
         if flow_map.H is None:
             return
@@ -447,9 +448,51 @@ class FlowMapIntegrator:
             'd2vy_dxdx': d2vy_dxdx, 'd2vy_dxdy': d2vy_dxdy, 'd2vy_dydy': d2vy_dydy,
         }
 
+    def evolve_particle_gradients_rk4(self, particles: ParticleSystem, dt: float):
+        """Evolve particle vorticity gradients for a materially conserved scalar.
+
+        Uses: D(grad q)/Dt = -(grad v)^T grad q
+        """
+        if not hasattr(particles, "grad_q_x"):
+            return
+
+        g0 = np.stack((particles.grad_q_x, particles.grad_q_y), axis=1)
+        x0 = np.ascontiguousarray(particles.x)
+        y0 = np.ascontiguousarray(particles.y)
+        Lx, Ly = self.grid.Lx, self.grid.Ly
+
+        # k1
+        vx1, vy1 = self._interpolate_velocity(x0, y0)
+        grad_v1 = self._interpolate_velocity_gradient(x0, y0)
+        k1 = -np.einsum('pji,pj->pi', grad_v1, g0)
+
+        # k2
+        x_mid, y_mid = _midpoint_positions(x0, y0, vx1, vy1, 0.5 * dt, Lx, Ly)
+        g_mid = g0 + 0.5 * dt * k1
+        vx2, vy2 = self._interpolate_velocity(x_mid, y_mid)
+        grad_v2 = self._interpolate_velocity_gradient(x_mid, y_mid)
+        k2 = -np.einsum('pji,pj->pi', grad_v2, g_mid)
+
+        # k3
+        x_mid2, y_mid2 = _midpoint_positions(x0, y0, vx2, vy2, 0.5 * dt, Lx, Ly)
+        g_mid2 = g0 + 0.5 * dt * k2
+        vx3, vy3 = self._interpolate_velocity(x_mid2, y_mid2)
+        grad_v3 = self._interpolate_velocity_gradient(x_mid2, y_mid2)
+        k3 = -np.einsum('pji,pj->pi', grad_v3, g_mid2)
+
+        # k4
+        x_end, y_end = _midpoint_positions(x0, y0, vx3, vy3, dt, Lx, Ly)
+        g_end = g0 + dt * k3
+        grad_v4 = self._interpolate_velocity_gradient(x_end, y_end)
+        k4 = -np.einsum('pji,pj->pi', grad_v4, g_end)
+
+        g_new = g0 + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        particles.grad_q_x = g_new[:, 0]
+        particles.grad_q_y = g_new[:, 1]
+
     @staticmethod
     def _compute_hessian_rhs(H, J, grad_v, d2v):
-        """Compute dH/dt."""
+        """Compute dH/dt for the backward flow map Hessian."""
         n = H.shape[0]
         dH = np.zeros_like(H)
 
@@ -457,21 +500,17 @@ class FlowMapIntegrator:
             for i in range(2):
                 for j in range(2):
                     for k in range(2):
-                        # Term 1: -H_ljk * ∂v_i/∂x_l
+                        term = 0.0
                         for l in range(2):
-                            dH[p, i, j, k] -= H[p, l, j, k] * grad_v[p, i, l]
-
-                        # Term 2: -J_lj * ∂²v_i/∂x_l∂x_k
-                        for l in range(2):
-                            dH[p, i, j, k] -= J[p, l, j] * d2v[p, i, l, k]
-
-                        # Term 3: -J_lk * ∂²v_i/∂x_l∂x_j
-                        for l in range(2):
-                            dH[p, i, j, k] -= J[p, l, k] * d2v[p, i, l, j]
+                            term += H[p, i, j, l] * grad_v[p, l, k]
+                            term += H[p, i, l, k] * grad_v[p, l, j]
+                            term += J[p, i, l] * d2v[p, l, j, k]
+                        dH[p, i, j, k] = -term
 
         return dH
 
-    def step(self, particles: ParticleSystem, flow_map: FlowMapState, dt: float):
+    def step(self, particles: ParticleSystem, flow_map: FlowMapState, dt: float,
+             update_gradients: bool = False):
         """Complete flow map integration step."""
         # Evolve Jacobian first (needs current positions)
         self.evolve_jacobian_rk4(particles, flow_map, dt)
@@ -479,6 +518,10 @@ class FlowMapIntegrator:
         # Evolve Hessian if tracking
         if self.track_hessian and flow_map.H is not None:
             self.evolve_hessian(particles, flow_map, dt)
+
+        # Evolve particle gradients if requested
+        if update_gradients:
+            self.evolve_particle_gradients_rk4(particles, dt)
 
         # Advect particles
         self.advect_particles_rk4(particles, dt)
@@ -492,7 +535,10 @@ class FlowMapIntegrator:
         # Hessian norm (if available)
         H_error = 0.0
         if flow_map.H is not None:
-            H_error = np.max(np.sqrt(np.sum(flow_map.H**2, axis=(1, 2, 3))))
+            with np.errstate(over="ignore", invalid="ignore"):
+                H_error = np.max(np.sqrt(np.sum(flow_map.H**2, axis=(1, 2, 3))))
+            if not np.isfinite(H_error):
+                H_error = np.nanmax(np.abs(flow_map.H))
 
         return J_error + 0.1 * H_error
 
@@ -641,7 +687,10 @@ class DualScaleFlowMapIntegrator:
 
         H_error = 0.0
         if flow_map.H_short is not None:
-            H_error = np.max(np.sqrt(np.sum(flow_map.H_short**2, axis=(1, 2, 3))))
+            with np.errstate(over="ignore", invalid="ignore"):
+                H_error = np.max(np.sqrt(np.sum(flow_map.H_short**2, axis=(1, 2, 3))))
+            if not np.isfinite(H_error):
+                H_error = np.nanmax(np.abs(flow_map.H_short))
 
         return J_error + 0.1 * H_error
 

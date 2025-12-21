@@ -132,7 +132,7 @@ if NUMBA_AVAILABLE:
             return 0.5 * t * t
         return 0.0
 
-    @njit(parallel=True, cache=True, fastmath=True)
+    @njit(cache=True, fastmath=True)
     def _p2g_3d_numba(px, py, pz, pq, nx, ny, nz, dx, dy, dz):
         """3D P2G transfer with quadratic B-spline."""
         n_particles = len(px)
@@ -141,7 +141,7 @@ if NUMBA_AVAILABLE:
 
         inv_dx, inv_dy, inv_dz = 1.0/dx, 1.0/dy, 1.0/dz
 
-        for p in prange(n_particles):
+        for p in range(n_particles):
             x_norm = px[p] * inv_dx
             y_norm = py[p] * inv_dy
             z_norm = pz[p] * inv_dz

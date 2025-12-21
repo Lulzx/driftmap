@@ -5,7 +5,7 @@ Computes E×B velocity from electrostatic potential using spectral derivatives.
 
 import numpy as np
 from numpy.fft import fft2, ifft2, fftfreq
-from .grid import Grid
+from ..core.grid import Grid
 
 
 def compute_velocity(grid: Grid):
